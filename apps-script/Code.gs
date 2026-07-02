@@ -15,6 +15,7 @@ const CONFIG = {
   WEEKLY_REPORT_SHEET_NAME: 'Weekly_Report',
   ENERGY_HEATMAP_SHEET_NAME: 'Energy_Heatmap',
   REMINDER_LOG_SHEET_NAME: 'Reminder_Log',
+  DYNAMIC_SCHEDULE_SHEET_NAME: 'Dynamic_Schedule',
 
   // Time configuration
   TIMEZONE: 'Asia/Tehran',
@@ -22,6 +23,13 @@ const CONFIG = {
   // Reminder configuration
   REMINDER_MINUTES_BEFORE: 60,
   REMINDER_WINDOW_MINUTES: 5,
+
+  // Smart rescheduling configuration
+  RESCHEDULE_DAY_START: '06:00',
+  RESCHEDULE_DAY_END: '23:00',
+  RESCHEDULE_BUFFER_MINUTES: 5,
+  RESCHEDULE_STEP_MINUTES: 5,
+  RESCHEDULE_SEARCH_DAYS: 7,
 
   // Status colors
   DONE_COLOR: '#b7e1cd',
@@ -39,53 +47,51 @@ const CONFIG = {
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return createJsonResponse({
-        ok: false,
-        error: 'Missing request body'
-      });
+      return createJsonResponse({ ok: false, error: 'Missing request body' });
     }
 
     const payload = JSON.parse(e.postData.contents);
 
     if (!payload.secret || payload.secret !== CONFIG.WORKER_API_SECRET) {
-      return createJsonResponse({
-        ok: false,
-        error: 'Unauthorized'
-      });
+      return createJsonResponse({ ok: false, error: 'Unauthorized' });
     }
 
     const action = cleanCell(payload.action);
-    const rowNumber = Number(payload.rowNumber || 0);
+    const taskRef = normalizeTaskRef(payload.taskRef, payload.rowNumber);
     const energyValue = Number(payload.energyValue || 0);
 
     if (action === 'done') {
-      validateTaskRow(rowNumber);
-      markSpecificRowAsDone(rowNumber);
+      validateTaskRef(taskRef);
+      markTaskAsDone(taskRef);
 
     } else if (action === 'skip') {
-      validateTaskRow(rowNumber);
-      markSpecificRowAsSkipped(rowNumber);
+      validateTaskRef(taskRef);
+      markTaskAsSkipped(taskRef);
 
     } else if (action === 'start') {
-      validateTaskRow(rowNumber);
-      markSpecificRowAsStarted(rowNumber);
+      validateTaskRef(taskRef);
+      markTaskAsStarted(taskRef);
 
     } else if (action === 'pause') {
-      validateTaskRow(rowNumber);
-      markSpecificRowAsPaused(rowNumber);
+      validateTaskRef(taskRef);
+      markTaskAsPaused(taskRef);
 
     } else if (action === 'later30') {
-      validateTaskRow(rowNumber);
-      markSpecificRowAsLater(rowNumber, 30);
+      validateTaskRef(taskRef);
+      markTaskAsLater(taskRef, 30);
 
     } else if (action === 'energy') {
-      validateTaskRow(rowNumber);
+      validateTaskRef(taskRef);
 
       if (!Number.isInteger(energyValue) || energyValue < 1 || energyValue > 5) {
         throw new Error('Energy value must be between 1 and 5.');
       }
 
-      markSpecificRowEnergy(rowNumber, energyValue);
+      markTaskEnergy(taskRef, energyValue);
+
+    } else if (action === 'reschedule') {
+      validateTaskRef(taskRef);
+      rescheduleTaskToNearestFreeTime(taskRef);
 
     } else if (action === 'report_today') {
       sendTodayReportToTelegram();
@@ -104,17 +110,13 @@ function doPost(e) {
     return createJsonResponse({
       ok: true,
       action: action,
-      rowNumber: rowNumber || null,
+      taskRef: taskRef || null,
       energyValue: energyValue || null
     });
 
   } catch (error) {
     Logger.log(`Worker API error: ${error.stack || error.message}`);
-
-    return createJsonResponse({
-      ok: false,
-      error: error.message
-    });
+    return createJsonResponse({ ok: false, error: error.message });
   }
 }
 
@@ -134,10 +136,21 @@ function createJsonResponse(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-/** Validates a schedule row number. */
-function validateTaskRow(rowNumber) {
-  if (!Number.isInteger(rowNumber) || rowNumber < 2) {
-    throw new Error(`Invalid row number: ${rowNumber}`);
+/** Converts old row-number callbacks into the new task-reference format. */
+function normalizeTaskRef(taskRef, rowNumber) {
+  const explicitRef = cleanCell(taskRef);
+  if (explicitRef) return explicitRef;
+
+  const numericRow = Number(rowNumber || 0);
+  return Number.isInteger(numericRow) && numericRow >= 2
+    ? `S${numericRow}`
+    : '';
+}
+
+/** Validates a static or dynamic task reference. */
+function validateTaskRef(taskRef) {
+  if (!/^(S\d+|D[A-Za-z0-9-]+)$/.test(cleanCell(taskRef))) {
+    throw new Error(`Invalid task reference: ${taskRef}`);
   }
 }
 
@@ -154,35 +167,11 @@ function checkUpcomingTaskReminders() {
   }
 
   try {
-    const sheet = SpreadsheetApp
-      .getActiveSpreadsheet()
-      .getSheetByName(CONFIG.SHEET_NAME);
-
-    if (!sheet) {
-      throw new Error(`Sheet not found: ${CONFIG.SHEET_NAME}`);
-    }
-
-    const data = sheet.getDataRange().getDisplayValues();
-
-    if (!data || data.length < 2) {
-      Logger.log('Schedule sheet is empty.');
-      return;
-    }
-
-    const headers = data[0].map(value => cleanCell(value));
-    const startCol = headers.indexOf('Start');
-    const finishCol = headers.indexOf('Finish');
-    const stateCol = headers.indexOf('State');
-    const todayName = getTodayColumnName();
-    const todayCol = headers.indexOf(todayName);
-
-    if (startCol === -1 || finishCol === -1 || stateCol === -1 || todayCol === -1) {
-      throw new Error(
-        'Required columns were not found. Required: Start, Finish, State, and weekday columns.'
-      );
-    }
-
     const now = getNowInConfiguredTimezone();
+    const todayDate = formatDateKey(now);
+    const todayName = getWeekdayNameForDate(now);
+    const tasks = getEffectiveTasksForDate(todayDate);
+
     const reminderTarget = new Date(
       now.getTime() + CONFIG.REMINDER_MINUTES_BEFORE * 60 * 1000
     );
@@ -193,66 +182,42 @@ function checkUpcomingTaskReminders() {
       reminderTarget.getTime() + CONFIG.REMINDER_WINDOW_MINUTES * 60 * 1000
     );
 
-    for (let i = 1; i < data.length; i++) {
-      const rowNumber = i + 1;
-      const row = data[i];
-      const startTime = cleanCell(row[startCol]);
-      const finishTime = cleanCell(row[finishCol]);
-      const state = cleanCell(row[stateCol]);
-      const task = cleanCell(row[todayCol]);
+    tasks.forEach(item => {
+      const startDateTime = combineDateKeyWithTime(todayDate, item.start);
 
-      if (isEmptyTask(startTime) || isEmptyTask(finishTime) || isEmptyTask(task)) {
-        continue;
+      if (startDateTime < windowStart || startDateTime > windowEnd) return;
+
+      if (wasReminderAlreadySent(todayDate, item.taskRef, item.start)) {
+        Logger.log(`Reminder already sent for ${item.taskRef} at ${item.start}.`);
+        return;
       }
-
-      let startDateTime;
-      let finishDateTime;
-
-      try {
-        startDateTime = combineTodayWithTime(startTime, now);
-        finishDateTime = combineTodayWithTime(finishTime, now);
-      } catch (error) {
-        Logger.log(`Skipped schedule row ${rowNumber}: ${error.message}`);
-        continue;
-      }
-
-      if (finishDateTime <= startDateTime) {
-        finishDateTime.setDate(finishDateTime.getDate() + 1);
-      }
-
-      const shouldSend = startDateTime >= windowStart && startDateTime <= windowEnd;
-      if (!shouldSend) continue;
-
-      if (wasReminderAlreadySentToday(rowNumber, startTime)) {
-        Logger.log(`Reminder already sent for row ${rowNumber} at ${startTime}.`);
-        continue;
-      }
-
-      const item = {
-        rowNumber: rowNumber,
-        start: formatTime(startDateTime),
-        finish: formatTime(finishDateTime),
-        state: state,
-        task: task
-      };
 
       sendSingleUpcomingTaskReminder(todayName, item);
-      setTaskCellStatusColor(rowNumber, 'pending');
+      setTaskCellStatusColor(item.originalRow, 'pending');
 
       saveActionLog({
         action: 'Pending',
-        rowNumber: rowNumber,
+        taskRef: item.taskRef,
+        rowNumber: item.originalRow,
         day: todayName,
         start: item.start,
         finish: item.finish,
         state: item.state,
         task: item.task,
-        commandType: 'one-hour reminder'
+        commandType: item.isDynamic
+          ? 'dynamic one-hour reminder'
+          : 'one-hour reminder'
       }, true);
 
-      saveReminderSentLog(rowNumber, startTime, todayName, task);
-    }
-
+      saveReminderSentLog(
+        item.taskRef,
+        item.originalRow,
+        item.start,
+        todayName,
+        item.task,
+        todayDate
+      );
+    });
   } finally {
     lock.releaseLock();
   }
@@ -261,7 +226,7 @@ function checkUpcomingTaskReminders() {
 /** Sends one task reminder with Telegram inline buttons. */
 function sendSingleUpcomingTaskReminder(todayName, item) {
   const message = [
-    '⏰ One-Hour Reminder',
+    item.isDynamic ? '🔄 Rescheduled Task Reminder' : '⏰ One-Hour Reminder',
     '',
     `🗓 ${todayName}`,
     `🕐 ${item.start} to ${item.finish}`,
@@ -269,27 +234,29 @@ function sendSingleUpcomingTaskReminder(todayName, item) {
     '',
     '🔹 Task:',
     item.task
-  ]
-    .filter(line => line !== '')
-    .join('\n');
+  ].filter(line => line !== '').join('\n');
 
+  const ref = item.taskRef;
   const keyboard = {
     inline_keyboard: [
       [
-        { text: '✅ Done', callback_data: `done:${item.rowNumber}` },
-        { text: '⏭ Skip', callback_data: `skip:${item.rowNumber}` }
+        { text: '✅ Done', callback_data: `done:${ref}` },
+        { text: '⏭ Skip', callback_data: `skip:${ref}` }
       ],
       [
-        { text: '⏱ Start', callback_data: `start:${item.rowNumber}` },
-        { text: '⏸ Pause', callback_data: `pause:${item.rowNumber}` },
-        { text: '🔁 Later', callback_data: `later30:${item.rowNumber}` }
+        { text: '⏱ Start', callback_data: `start:${ref}` },
+        { text: '⏸ Pause', callback_data: `pause:${ref}` },
+        { text: '🔁 Later', callback_data: `later30:${ref}` }
       ],
       [
-        { text: '🔥1', callback_data: `energyval:${item.rowNumber}:1` },
-        { text: '🔥2', callback_data: `energyval:${item.rowNumber}:2` },
-        { text: '🔥3', callback_data: `energyval:${item.rowNumber}:3` },
-        { text: '🔥4', callback_data: `energyval:${item.rowNumber}:4` },
-        { text: '🔥5', callback_data: `energyval:${item.rowNumber}:5` }
+        { text: '🔄 Reschedule to Free Time', callback_data: `reschedule:${ref}` }
+      ],
+      [
+        { text: '🔥1', callback_data: `energyval:${ref}:1` },
+        { text: '🔥2', callback_data: `energyval:${ref}:2` },
+        { text: '🔥3', callback_data: `energyval:${ref}:3` },
+        { text: '🔥4', callback_data: `energyval:${ref}:4` },
+        { text: '🔥5', callback_data: `energyval:${ref}:5` }
       ],
       [
         { text: '📊 Today', callback_data: 'report:today' },
@@ -302,8 +269,8 @@ function sendSingleUpcomingTaskReminder(todayName, item) {
   sendTelegramMessageWithKeyboard(message, keyboard);
 }
 
-/** Checks whether a reminder was already sent today. */
-function wasReminderAlreadySentToday(rowNumber, startTime) {
+/** Checks whether a reminder was already sent for a date and task reference. */
+function wasReminderAlreadySent(dateKey, taskRef, startTime) {
   const sheet = SpreadsheetApp
     .getActiveSpreadsheet()
     .getSheetByName(CONFIG.REMINDER_LOG_SHEET_NAME);
@@ -311,17 +278,12 @@ function wasReminderAlreadySentToday(rowNumber, startTime) {
   if (!sheet || sheet.getLastRow() < 2) return false;
 
   const data = sheet.getDataRange().getDisplayValues();
-  const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
 
   for (let i = 1; i < data.length; i++) {
-    const reminderDate = cleanCell(data[i][1]);
-    const loggedRow = Number(data[i][3]);
-    const loggedStart = cleanCell(data[i][4]);
-
     if (
-      reminderDate === today &&
-      loggedRow === Number(rowNumber) &&
-      loggedStart === cleanCell(startTime)
+      cleanCell(data[i][1]) === dateKey &&
+      cleanCell(data[i][3]) === taskRef &&
+      cleanCell(data[i][5]) === cleanCell(startTime)
     ) {
       return true;
     }
@@ -331,7 +293,7 @@ function wasReminderAlreadySentToday(rowNumber, startTime) {
 }
 
 /** Saves a sent reminder record. */
-function saveReminderSentLog(rowNumber, startTime, day, task) {
+function saveReminderSentLog(taskRef, rowNumber, startTime, day, task, dateKey) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(CONFIG.REMINDER_LOG_SHEET_NAME);
 
@@ -344,148 +306,147 @@ function saveReminderSentLog(rowNumber, startTime, day, task) {
 
   sheet.appendRow([
     Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
-    Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd'),
+    dateKey || formatDateKey(now),
     day,
+    taskRef,
     rowNumber,
     startTime,
     task
   ]);
 }
 
-function markSpecificRowAsDone(rowNumber) {
-  const taskInfo = getTaskInfoByRow(rowNumber);
+
+function markTaskAsDone(taskRef) {
+  const taskInfo = getTaskInfoByRef(taskRef);
   if (!taskInfo.ok) throw new Error(taskInfo.message);
 
-  if (!isAlreadyLoggedToday(rowNumber, 'Done')) {
-    saveActionLog({
-      action: 'Done',
-      rowNumber,
-      day: taskInfo.day,
-      start: taskInfo.start,
-      finish: taskInfo.finish,
-      state: taskInfo.state,
-      task: taskInfo.task,
-      commandType: 'cloudflare done button'
-    }, false);
+  if (!isAlreadyLoggedToday(taskRef, 'Done')) {
+    saveTaskAction(taskInfo, 'Done', 'cloudflare done button');
   }
 
-  setTaskCellStatusColor(rowNumber, 'done');
+  completeDynamicTaskIfNeeded(taskInfo);
+  setTaskCellStatusColor(taskInfo.originalRow, 'done');
 }
 
-function markSpecificRowAsSkipped(rowNumber) {
-  const taskInfo = getTaskInfoByRow(rowNumber);
+function markTaskAsSkipped(taskRef) {
+  const taskInfo = getTaskInfoByRef(taskRef);
   if (!taskInfo.ok) throw new Error(taskInfo.message);
 
-  if (!isAlreadyLoggedToday(rowNumber, 'Skipped')) {
-    saveActionLog({
-      action: 'Skipped',
-      rowNumber,
-      day: taskInfo.day,
-      start: taskInfo.start,
-      finish: taskInfo.finish,
-      state: taskInfo.state,
-      task: taskInfo.task,
-      commandType: 'cloudflare skip button'
-    }, false);
+  if (!isAlreadyLoggedToday(taskRef, 'Skipped')) {
+    saveTaskAction(taskInfo, 'Skipped', 'cloudflare skip button');
   }
 
-  setTaskCellStatusColor(rowNumber, 'skipped');
+  completeDynamicTaskIfNeeded(taskInfo, 'Skipped');
+  setTaskCellStatusColor(taskInfo.originalRow, 'skipped');
 }
 
-function markSpecificRowAsStarted(rowNumber) {
-  const taskInfo = getTaskInfoByRow(rowNumber);
+function markTaskAsStarted(taskRef) {
+  const taskInfo = getTaskInfoByRef(taskRef);
   if (!taskInfo.ok) throw new Error(taskInfo.message);
-
-  saveActionLog({
-    action: 'Started',
-    rowNumber,
-    day: taskInfo.day,
-    start: taskInfo.start,
-    finish: taskInfo.finish,
-    state: taskInfo.state,
-    task: taskInfo.task,
-    commandType: 'cloudflare start button'
-  }, false);
-
-  setTaskCellStatusColor(rowNumber, 'started');
+  saveTaskAction(taskInfo, 'Started', 'cloudflare start button');
+  setTaskCellStatusColor(taskInfo.originalRow, 'started');
 }
 
-function markSpecificRowAsPaused(rowNumber) {
-  const taskInfo = getTaskInfoByRow(rowNumber);
+function markTaskAsPaused(taskRef) {
+  const taskInfo = getTaskInfoByRef(taskRef);
   if (!taskInfo.ok) throw new Error(taskInfo.message);
-
-  saveActionLog({
-    action: 'Paused',
-    rowNumber,
-    day: taskInfo.day,
-    start: taskInfo.start,
-    finish: taskInfo.finish,
-    state: taskInfo.state,
-    task: taskInfo.task,
-    commandType: 'cloudflare pause button'
-  }, false);
-
-  setTaskCellStatusColor(rowNumber, 'paused');
+  saveTaskAction(taskInfo, 'Paused', 'cloudflare pause button');
+  setTaskCellStatusColor(taskInfo.originalRow, 'paused');
 }
 
-function markSpecificRowAsLater(rowNumber, minutes) {
-  const taskInfo = getTaskInfoByRow(rowNumber);
+function markTaskAsLater(taskRef, minutes) {
+  const taskInfo = getTaskInfoByRef(taskRef);
   if (!taskInfo.ok) throw new Error(taskInfo.message);
-
-  saveActionLog({
-    action: `Later ${minutes}m`,
-    rowNumber,
-    day: taskInfo.day,
-    start: taskInfo.start,
-    finish: taskInfo.finish,
-    state: taskInfo.state,
-    task: taskInfo.task,
-    commandType: 'cloudflare later button'
-  }, false);
-
-  setTaskCellStatusColor(rowNumber, 'skipped');
+  saveTaskAction(taskInfo, `Later ${minutes}m`, 'cloudflare later button');
+  setTaskCellStatusColor(taskInfo.originalRow, 'skipped');
 }
 
-function markSpecificRowEnergy(rowNumber, energyValue) {
-  const taskInfo = getTaskInfoByRow(rowNumber);
+function markTaskEnergy(taskRef, energyValue) {
+  const taskInfo = getTaskInfoByRef(taskRef);
   if (!taskInfo.ok) throw new Error(taskInfo.message);
 
   const mood = energyToMoodLabel(energyValue);
 
   saveMoodLog({
-    rowNumber,
+    taskRef: taskRef,
+    rowNumber: taskInfo.originalRow,
     day: taskInfo.day,
     start: taskInfo.start,
     finish: taskInfo.finish,
     state: taskInfo.state,
     task: taskInfo.task,
     energy: energyValue,
-    mood,
+    mood: mood,
     source: 'cloudflare energy button'
   });
 
   saveActionLog({
     action: `Energy ${energyValue}/5`,
-    rowNumber,
+    taskRef: taskRef,
+    rowNumber: taskInfo.originalRow,
     day: taskInfo.day,
     start: taskInfo.start,
     finish: taskInfo.finish,
     state: taskInfo.state,
     task: taskInfo.task,
     energy: energyValue,
-    mood,
+    mood: mood,
     commandType: 'cloudflare energy button'
   }, false);
 }
 
-function getTaskInfoByRow(rowNumber) {
+function saveTaskAction(taskInfo, action, commandType) {
+  saveActionLog({
+    action: action,
+    taskRef: taskInfo.taskRef,
+    rowNumber: taskInfo.originalRow,
+    day: taskInfo.day,
+    start: taskInfo.start,
+    finish: taskInfo.finish,
+    state: taskInfo.state,
+    task: taskInfo.task,
+    commandType: commandType
+  }, false);
+}
+
+function getTaskInfoByRef(taskRef) {
+  validateTaskRef(taskRef);
+
+  if (taskRef.startsWith('D')) {
+    const dynamicId = taskRef.substring(1);
+    const item = getDynamicTaskById(dynamicId);
+
+    if (!item || item.status !== 'Active') {
+      return { ok: false, message: `Active dynamic task not found: ${dynamicId}` };
+    }
+
+    return {
+      ok: true,
+      taskRef: taskRef,
+      originalRow: Number(item.originalRow),
+      day: getWeekdayNameForDate(parseDateKey(item.scheduleDate)),
+      dateKey: item.scheduleDate,
+      start: item.newStart,
+      finish: item.newFinish,
+      state: item.state,
+      task: item.task,
+      isDynamic: true,
+      dynamicId: item.dynamicId,
+      dynamicSheetRow: item.sheetRow,
+      originalDate: item.originalDate
+    };
+  }
+
+  const rowNumber = Number(taskRef.substring(1));
+  return getStaticTaskInfoByRow(rowNumber, formatDateKey(new Date()));
+}
+
+function getStaticTaskInfoByRow(rowNumber, dateKey) {
   const sheet = SpreadsheetApp
     .getActiveSpreadsheet()
     .getSheetByName(CONFIG.SHEET_NAME);
 
-  if (!sheet) {
-    return { ok: false, message: `Sheet not found: ${CONFIG.SHEET_NAME}` };
-  }
+  if (!sheet) return { ok: false, message: `Sheet not found: ${CONFIG.SHEET_NAME}` };
 
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
@@ -494,43 +455,44 @@ function getTaskInfoByRow(rowNumber) {
     return { ok: false, message: `Invalid schedule row: ${rowNumber}` };
   }
 
-  const headers = sheet
-    .getRange(1, 1, 1, lastCol)
-    .getDisplayValues()[0]
-    .map(value => cleanCell(value));
-
-  const row = sheet
-    .getRange(rowNumber, 1, 1, lastCol)
-    .getDisplayValues()[0];
+  const headers = sheet.getRange(1, 1, 1, lastCol)
+    .getDisplayValues()[0].map(value => cleanCell(value));
+  const row = sheet.getRange(rowNumber, 1, 1, lastCol).getDisplayValues()[0];
+  const day = getWeekdayNameForDate(parseDateKey(dateKey));
 
   const startCol = headers.indexOf('Start');
   const finishCol = headers.indexOf('Finish');
   const stateCol = headers.indexOf('State');
-  const todayName = getTodayColumnName();
-  const todayCol = headers.indexOf(todayName);
+  const dayCol = headers.indexOf(day);
 
-  if (startCol === -1 || finishCol === -1 || stateCol === -1 || todayCol === -1) {
+  if (startCol === -1 || finishCol === -1 || stateCol === -1 || dayCol === -1) {
     return { ok: false, message: 'Required schedule columns were not found.' };
   }
 
-  const start = cleanCell(row[startCol]);
-  const finish = cleanCell(row[finishCol]);
-  const state = cleanCell(row[stateCol]);
-  const task = cleanCell(row[todayCol]);
-
+  const task = cleanCell(row[dayCol]);
   if (isEmptyTask(task)) {
-    return { ok: false, message: `Row ${rowNumber} has no task for ${todayName}.` };
+    return { ok: false, message: `Row ${rowNumber} has no task for ${day}.` };
   }
 
   return {
     ok: true,
-    rowNumber,
-    day: todayName,
-    start,
-    finish,
-    state,
-    task
+    taskRef: `S${rowNumber}`,
+    originalRow: rowNumber,
+    day: day,
+    dateKey: dateKey,
+    start: cleanCell(row[startCol]),
+    finish: cleanCell(row[finishCol]),
+    state: cleanCell(row[stateCol]),
+    task: task,
+    isDynamic: false
   };
+}
+
+function completeDynamicTaskIfNeeded(taskInfo, status) {
+  if (!taskInfo.isDynamic || !taskInfo.dynamicSheetRow) return;
+  getDynamicScheduleSheet()
+    .getRange(taskInfo.dynamicSheetRow, 12)
+    .setValue(status || 'Completed');
 }
 
 function saveActionLog(item, preventDuplicate) {
@@ -542,7 +504,7 @@ function saveActionLog(item, preventDuplicate) {
     createActionLogHeader(sheet);
   }
 
-  if (preventDuplicate && isAlreadyLoggedToday(item.rowNumber, item.action)) {
+  if (preventDuplicate && isAlreadyLoggedToday(item.taskRef || `S${item.rowNumber}`, item.action)) {
     return;
   }
 
@@ -552,6 +514,7 @@ function saveActionLog(item, preventDuplicate) {
     Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
     Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd'),
     item.action || '',
+    item.taskRef || `S${item.rowNumber}`,
     item.day || '',
     item.rowNumber || '',
     item.start || '',
@@ -580,6 +543,7 @@ function saveMoodLog(item) {
     Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd'),
     item.day,
     extractHourFromTime(item.start),
+    item.taskRef || `S${item.rowNumber}`,
     item.rowNumber,
     item.start,
     item.finish,
@@ -591,7 +555,7 @@ function saveMoodLog(item) {
   ]);
 }
 
-function isAlreadyLoggedToday(rowNumber, action) {
+function isAlreadyLoggedToday(taskRef, action) {
   const sheet = SpreadsheetApp
     .getActiveSpreadsheet()
     .getSheetByName(CONFIG.ACTION_LOG_SHEET_NAME);
@@ -604,18 +568,532 @@ function isAlreadyLoggedToday(rowNumber, action) {
   for (let i = 1; i < data.length; i++) {
     const actionDate = cleanCell(data[i][1]);
     const loggedAction = cleanCell(data[i][2]);
-    const loggedRow = Number(data[i][4]);
+    const loggedTaskRef = cleanCell(data[i][3]);
 
     if (
       actionDate === today &&
       loggedAction === action &&
-      loggedRow === Number(rowNumber)
+      loggedTaskRef === taskRef
     ) {
       return true;
     }
   }
 
   return false;
+}
+
+
+/** Reschedules a task into the nearest available slot. */
+function rescheduleTaskToNearestFreeTime(taskRef) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) throw new Error(taskInfo.message);
+
+    const now = getNowInConfiguredTimezone();
+    const durationMinutes = calculateDurationMinutes(taskInfo.start, taskInfo.finish);
+    if (durationMinutes <= 0) throw new Error('Task duration could not be calculated.');
+
+    const slot = findNearestFreeSlot(
+      taskInfo,
+      durationMinutes,
+      now,
+      CONFIG.RESCHEDULE_SEARCH_DAYS
+    );
+
+    if (!slot) {
+      saveTaskAction(taskInfo, 'Reschedule Failed', 'smart reschedule');
+      sendTelegramMessage([
+        '⚠️ No suitable free time was found.',
+        '',
+        `📌 Task: ${taskInfo.task}`,
+        `⏱ Required duration: ${formatMinutes(durationMinutes)}`,
+        '',
+        `The system searched the next ${CONFIG.RESCHEDULE_SEARCH_DAYS} day(s).`
+      ].join('\n'));
+      return null;
+    }
+
+    if (taskInfo.isDynamic) {
+      setDynamicTaskStatus(taskInfo.dynamicSheetRow, 'Superseded');
+    }
+
+    const count = getNextRescheduleCount(taskInfo.originalRow, taskInfo.originalDate || taskInfo.dateKey);
+    const dynamicId = `${slot.dateKey.replace(/-/g, '')}-R${taskInfo.originalRow}-V${count}`;
+
+    appendDynamicScheduleRow({
+      dynamicId: dynamicId,
+      originalDate: taskInfo.originalDate || taskInfo.dateKey,
+      scheduleDate: slot.dateKey,
+      originalRow: taskInfo.originalRow,
+      originalStart: taskInfo.isDynamic ? getOriginalTimes(taskInfo).start : taskInfo.start,
+      originalFinish: taskInfo.isDynamic ? getOriginalTimes(taskInfo).finish : taskInfo.finish,
+      previousTaskRef: taskRef,
+      newStart: slot.start,
+      newFinish: slot.finish,
+      state: taskInfo.state,
+      task: taskInfo.task,
+      status: 'Active',
+      reason: 'Nearest free time',
+      rescheduleCount: count
+    });
+
+    const newTaskRef = `D${dynamicId}`;
+    saveActionLog({
+      action: 'Rescheduled',
+      taskRef: newTaskRef,
+      rowNumber: taskInfo.originalRow,
+      day: slot.dayName,
+      start: slot.start,
+      finish: slot.finish,
+      state: taskInfo.state,
+      task: taskInfo.task,
+      commandType: `from ${taskInfo.dateKey} ${taskInfo.start}-${taskInfo.finish}`
+    }, false);
+
+    setTaskCellStatusColor(taskInfo.originalRow, 'paused');
+
+    const dateLabel = slot.dateKey === formatDateKey(now) ? 'Today' : slot.dateKey;
+    sendTelegramMessage([
+      '✅ Task Rescheduled',
+      '',
+      `📌 ${taskInfo.task}`,
+      !isEmptyTask(taskInfo.state) ? `▪️ Category: ${taskInfo.state}` : '',
+      '',
+      `Previous: ${taskInfo.dateKey}, ${taskInfo.start}–${taskInfo.finish}`,
+      `New: ${dateLabel}, ${slot.start}–${slot.finish}`,
+      '',
+      'A new reminder will be sent one hour before the rescheduled task.'
+    ].filter(Boolean).join('\n'));
+
+    return { ...slot, taskRef: newTaskRef };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function findNearestFreeSlot(
+  taskInfo,
+  durationMinutes,
+  now,
+  searchDays
+) {
+  if (!taskInfo || !taskInfo.taskRef) {
+    throw new Error('Task information is missing.');
+  }
+
+  if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+    throw new Error(`Invalid task duration: ${durationMinutes}`);
+  }
+
+  const daysToSearch = Math.max(1, Number(searchDays) || 1);
+
+  for (let dayOffset = 0; dayOffset < daysToSearch; dayOffset++) {
+    const targetDate = new Date(now);
+    targetDate.setHours(12, 0, 0, 0);
+    targetDate.setDate(targetDate.getDate() + dayOffset);
+
+    const dateKey = formatDateKey(targetDate);
+    const dayStart = combineDateKeyWithTime(
+      dateKey,
+      CONFIG.RESCHEDULE_DAY_START
+    );
+    const dayEnd = combineDateKeyWithTime(
+      dateKey,
+      CONFIG.RESCHEDULE_DAY_END
+    );
+
+    let earliest = new Date(dayStart);
+
+    if (dayOffset === 0) {
+      earliest = roundDateUpToMinutes(
+        new Date(
+          now.getTime() +
+          CONFIG.RESCHEDULE_BUFFER_MINUTES * 60000
+        ),
+        CONFIG.RESCHEDULE_STEP_MINUTES
+      );
+
+      if (earliest < dayStart) {
+        earliest = new Date(dayStart);
+      }
+    }
+
+    if (earliest >= dayEnd) {
+      Logger.log(
+        `Reschedule search skipped ${dateKey}: earliest time is after day end.`
+      );
+      continue;
+    }
+
+    // Exclude the task only from the date where it is currently scheduled.
+    // A recurring weekly row on another date must still remain busy.
+    const excludedTaskRef =
+      dateKey === taskInfo.dateKey
+        ? taskInfo.taskRef
+        : '';
+
+    const busyIntervals = getBusyIntervalsForDate(
+      dateKey,
+      excludedTaskRef
+    );
+
+    Logger.log(
+      `Searching ${dateKey} from ${formatTime(earliest)} to ` +
+      `${formatTime(dayEnd)} for ${durationMinutes} minutes. ` +
+      `Busy intervals: ${busyIntervals.length}.`
+    );
+
+    const gap = findGapInIntervals(
+      earliest,
+      dayEnd,
+      durationMinutes,
+      busyIntervals,
+      CONFIG.RESCHEDULE_BUFFER_MINUTES
+    );
+
+    if (gap) {
+      return {
+        dateKey: dateKey,
+        dayName: getWeekdayNameForDate(targetDate),
+        start: formatTime(gap.start),
+        finish: formatTime(gap.finish)
+      };
+    }
+  }
+
+  return null;
+}
+
+function getBusyIntervalsForDate(dateKey, excludedTaskRef) {
+  const tasks = getEffectiveTasksForDate(dateKey);
+  const intervals = [];
+
+  tasks.forEach(item => {
+    if (
+      excludedTaskRef &&
+      item.taskRef === excludedTaskRef
+    ) {
+      return;
+    }
+
+    try {
+      const start = combineDateKeyWithTime(
+        dateKey,
+        item.start
+      );
+
+      let finish = combineDateKeyWithTime(
+        dateKey,
+        item.finish
+      );
+
+      if (finish <= start) {
+        finish.setDate(finish.getDate() + 1);
+      }
+
+      intervals.push({
+        taskRef: item.taskRef,
+        start: start,
+        finish: finish
+      });
+    } catch (error) {
+      Logger.log(
+        `Invalid busy interval ignored for ${item.taskRef}: ${error.message}`
+      );
+    }
+  });
+
+  return intervals.sort(
+    (a, b) => a.start.getTime() - b.start.getTime()
+  );
+}
+
+function findGapInIntervals(
+  earliestStart,
+  dayEnd,
+  durationMinutes,
+  intervals,
+  bufferMinutes
+) {
+  const durationMs = Number(durationMinutes) * 60000;
+  const bufferMs = Math.max(0, Number(bufferMinutes) || 0) * 60000;
+
+  if (
+    !(earliestStart instanceof Date) ||
+    isNaN(earliestStart.getTime()) ||
+    !(dayEnd instanceof Date) ||
+    isNaN(dayEnd.getTime()) ||
+    durationMs <= 0 ||
+    earliestStart >= dayEnd
+  ) {
+    return null;
+  }
+
+  /*
+   * Expand every busy interval by the configured buffer,
+   * clip it to the searchable day, and merge overlaps.
+   */
+  const normalized = (intervals || [])
+    .filter(interval =>
+      interval &&
+      interval.start instanceof Date &&
+      !isNaN(interval.start.getTime()) &&
+      interval.finish instanceof Date &&
+      !isNaN(interval.finish.getTime())
+    )
+    .map(interval => ({
+      start: new Date(
+        Math.max(
+          earliestStart.getTime(),
+          interval.start.getTime() - bufferMs
+        )
+      ),
+      finish: new Date(
+        Math.min(
+          dayEnd.getTime(),
+          interval.finish.getTime() + bufferMs
+        )
+      )
+    }))
+    .filter(interval =>
+      interval.finish > earliestStart &&
+      interval.start < dayEnd &&
+      interval.finish > interval.start
+    )
+    .sort(
+      (a, b) => a.start.getTime() - b.start.getTime()
+    );
+
+  const merged = [];
+
+  normalized.forEach(interval => {
+    const last = merged[merged.length - 1];
+
+    if (
+      !last ||
+      interval.start.getTime() > last.finish.getTime()
+    ) {
+      merged.push({
+        start: new Date(interval.start),
+        finish: new Date(interval.finish)
+      });
+      return;
+    }
+
+    if (interval.finish > last.finish) {
+      last.finish = new Date(interval.finish);
+    }
+  });
+
+  let candidateStart = roundDateUpToMinutes(
+    new Date(earliestStart),
+    CONFIG.RESCHEDULE_STEP_MINUTES
+  );
+
+  for (const interval of merged) {
+    if (interval.finish <= candidateStart) {
+      continue;
+    }
+
+    const candidateFinish = new Date(
+      candidateStart.getTime() + durationMs
+    );
+
+    // The current candidate fits before the next blocked interval.
+    if (candidateFinish <= interval.start) {
+      return {
+        start: candidateStart,
+        finish: candidateFinish
+      };
+    }
+
+    // Continue searching after the blocked interval.
+    candidateStart = roundDateUpToMinutes(
+      new Date(
+        Math.max(
+          candidateStart.getTime(),
+          interval.finish.getTime()
+        )
+      ),
+      CONFIG.RESCHEDULE_STEP_MINUTES
+    );
+
+    if (candidateStart >= dayEnd) {
+      return null;
+    }
+  }
+
+  // Critical final check: free time after the last busy interval.
+  const finalCandidateFinish = new Date(
+    candidateStart.getTime() + durationMs
+  );
+
+  if (finalCandidateFinish <= dayEnd) {
+    return {
+      start: candidateStart,
+      finish: finalCandidateFinish
+    };
+  }
+
+  return null;
+}
+
+function getEffectiveTasksForDate(dateKey) {
+  const originals = getOriginalTasksForDate(dateKey);
+  const dynamics = getActiveDynamicTasksForDate(dateKey);
+  const overriddenStaticRefs = {};
+
+  getAllActiveDynamicTasks()
+    .filter(item => item.originalDate === dateKey)
+    .forEach(item => {
+      overriddenStaticRefs[`S${item.originalRow}`] = true;
+    });
+
+  const staticTasks = originals.filter(item => !overriddenStaticRefs[item.taskRef]);
+  const dynamicTasks = dynamics.map(item => ({
+    taskRef: `D${item.dynamicId}`,
+    originalRow: Number(item.originalRow),
+    start: item.newStart,
+    finish: item.newFinish,
+    state: item.state,
+    task: item.task,
+    isDynamic: true,
+    dateKey: item.scheduleDate
+  }));
+
+  return staticTasks.concat(dynamicTasks).sort((a, b) => {
+    const at = parseTimeString(a.start);
+    const bt = parseTimeString(b.start);
+    return (at.hours * 60 + at.minutes) - (bt.hours * 60 + bt.minutes);
+  });
+}
+
+function getOriginalTasksForDate(dateKey) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet not found: ${CONFIG.SHEET_NAME}`);
+
+  const data = sheet.getDataRange().getDisplayValues();
+  if (!data || data.length < 2) return [];
+
+  const headers = data[0].map(cleanCell);
+  const startCol = headers.indexOf('Start');
+  const finishCol = headers.indexOf('Finish');
+  const stateCol = headers.indexOf('State');
+  const dayName = getWeekdayNameForDate(parseDateKey(dateKey));
+  const dayCol = headers.indexOf(dayName);
+
+  if (startCol === -1 || finishCol === -1 || stateCol === -1 || dayCol === -1) {
+    throw new Error('Required schedule columns were not found.');
+  }
+
+  const result = [];
+  for (let i = 1; i < data.length; i++) {
+    const start = cleanCell(data[i][startCol]);
+    const finish = cleanCell(data[i][finishCol]);
+    const task = cleanCell(data[i][dayCol]);
+    if (isEmptyTask(start) || isEmptyTask(finish) || isEmptyTask(task)) continue;
+
+    result.push({
+      taskRef: `S${i + 1}`,
+      originalRow: i + 1,
+      start: start,
+      finish: finish,
+      state: cleanCell(data[i][stateCol]),
+      task: task,
+      isDynamic: false,
+      dateKey: dateKey
+    });
+  }
+  return result;
+}
+
+function getDynamicScheduleSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME);
+    createDynamicScheduleHeader(sheet);
+  }
+  return sheet;
+}
+
+function getAllDynamicTasks() {
+  const sheet = getDynamicScheduleSheet();
+  if (sheet.getLastRow() < 2) return [];
+
+  return sheet.getDataRange().getDisplayValues().slice(1).map((row, index) => ({
+    sheetRow: index + 2,
+    dynamicId: row[0],
+    createdAt: row[1],
+    originalDate: row[2],
+    scheduleDate: row[3],
+    originalRow: Number(row[4]),
+    originalStart: row[5],
+    originalFinish: row[6],
+    previousTaskRef: row[7],
+    newStart: row[8],
+    newFinish: row[9],
+    state: row[10],
+    status: row[11],
+    task: row[12],
+    reason: row[13],
+    rescheduleCount: Number(row[14] || 0)
+  }));
+}
+
+function getAllActiveDynamicTasks() {
+  return getAllDynamicTasks().filter(item => item.status === 'Active');
+}
+
+function getActiveDynamicTasksForDate(dateKey) {
+  return getAllActiveDynamicTasks().filter(item => item.scheduleDate === dateKey);
+}
+
+function getDynamicTaskById(dynamicId) {
+  const matches = getAllDynamicTasks().filter(item => item.dynamicId === dynamicId);
+  return matches.length ? matches[matches.length - 1] : null;
+}
+
+function setDynamicTaskStatus(sheetRow, status) {
+  getDynamicScheduleSheet().getRange(sheetRow, 12).setValue(status);
+}
+
+function getNextRescheduleCount(originalRow, originalDate) {
+  const matches = getAllDynamicTasks().filter(item =>
+    Number(item.originalRow) === Number(originalRow) &&
+    item.originalDate === originalDate
+  );
+  return matches.length + 1;
+}
+
+function getOriginalTimes(taskInfo) {
+  const item = getDynamicTaskById(taskInfo.dynamicId);
+  return item
+    ? { start: item.originalStart, finish: item.originalFinish }
+    : { start: taskInfo.start, finish: taskInfo.finish };
+}
+
+function appendDynamicScheduleRow(item) {
+  getDynamicScheduleSheet().appendRow([
+    item.dynamicId,
+    Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
+    item.originalDate,
+    item.scheduleDate,
+    item.originalRow,
+    item.originalStart,
+    item.originalFinish,
+    item.previousTaskRef,
+    item.newStart,
+    item.newFinish,
+    item.state,
+    item.status,
+    item.task,
+    item.reason,
+    item.rescheduleCount
+  ]);
 }
 
 function setTaskCellStatusColor(rowNumber, status) {
@@ -695,7 +1173,7 @@ function buildReportForDateRange(startDate, endDate) {
   actionRows.forEach(row => {
     if (!isDateInRange(row.actionDate, startDate, endDate)) return;
 
-    const taskKey = `${row.actionDate}:${row.rowNumber}`;
+    const taskKey = `${row.actionDate}:${row.taskRef || row.rowNumber}`;
 
     if (row.action === 'Pending') uniquePending[taskKey] = true;
 
@@ -891,15 +1369,16 @@ function getActionLogRows() {
     actionAt: row[0],
     actionDate: row[1],
     action: row[2],
-    day: row[3],
-    rowNumber: row[4],
-    start: row[5],
-    finish: row[6],
-    state: row[7],
-    task: row[8],
-    energy: row[9],
-    mood: row[10],
-    commandType: row[11]
+    taskRef: row[3],
+    day: row[4],
+    rowNumber: row[5],
+    start: row[6],
+    finish: row[7],
+    state: row[8],
+    task: row[9],
+    energy: row[10],
+    mood: row[11],
+    commandType: row[12]
   }));
 }
 
@@ -915,14 +1394,15 @@ function getMoodLogRows() {
     date: row[1],
     day: row[2],
     hour: row[3],
-    rowNumber: row[4],
-    start: row[5],
-    finish: row[6],
-    state: row[7],
-    task: row[8],
-    energy: row[9],
-    mood: row[10],
-    source: row[11]
+    taskRef: row[4],
+    rowNumber: row[5],
+    start: row[6],
+    finish: row[7],
+    state: row[8],
+    task: row[9],
+    energy: row[10],
+    mood: row[11],
+    source: row[12]
   }));
 }
 
@@ -1008,6 +1488,7 @@ function fullResetSystem() {
     '✅ Action_Log was recreated',
     '✅ Mood_Log was recreated',
     '✅ Reminder_Log was recreated',
+    '✅ Dynamic_Schedule was recreated',
     '✅ Weekly_Report was recreated',
     '✅ Energy_Heatmap was recreated',
     '✅ Schedule colors were reset',
@@ -1022,6 +1503,7 @@ function resetGeneratedSheets() {
     CONFIG.ACTION_LOG_SHEET_NAME,
     CONFIG.MOOD_LOG_SHEET_NAME,
     CONFIG.REMINDER_LOG_SHEET_NAME,
+    CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME,
     CONFIG.WEEKLY_REPORT_SHEET_NAME,
     CONFIG.ENERGY_HEATMAP_SHEET_NAME
   ].forEach(sheetName => {
@@ -1042,6 +1524,9 @@ function createAllGeneratedSheets() {
   const reminderLog = ss.insertSheet(CONFIG.REMINDER_LOG_SHEET_NAME);
   createReminderLogHeader(reminderLog);
 
+  const dynamicSchedule = ss.insertSheet(CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME);
+  createDynamicScheduleHeader(dynamicSchedule);
+
   const weeklyReport = ss.insertSheet(CONFIG.WEEKLY_REPORT_SHEET_NAME);
   createWeeklyReportHeader(weeklyReport);
 
@@ -1052,7 +1537,7 @@ function createAllGeneratedSheets() {
 function createActionLogHeader(sheet) {
   sheet.clear();
   sheet.appendRow([
-    'Action At', 'Action Date', 'Action', 'Day', 'Row Number',
+    'Action At', 'Action Date', 'Action', 'Task Ref', 'Day', 'Row Number',
     'Start', 'Finish', 'State', 'Task', 'Energy', 'Mood', 'Command Type'
   ]);
   formatHeaderRow(sheet);
@@ -1061,7 +1546,7 @@ function createActionLogHeader(sheet) {
 function createMoodLogHeader(sheet) {
   sheet.clear();
   sheet.appendRow([
-    'Logged At', 'Date', 'Day', 'Hour', 'Row Number',
+    'Logged At', 'Date', 'Day', 'Hour', 'Task Ref', 'Row Number',
     'Start', 'Finish', 'State', 'Task', 'Energy', 'Mood', 'Source'
   ]);
   formatHeaderRow(sheet);
@@ -1070,7 +1555,18 @@ function createMoodLogHeader(sheet) {
 function createReminderLogHeader(sheet) {
   sheet.clear();
   sheet.appendRow([
-    'Sent At', 'Reminder Date', 'Day', 'Row Number', 'Start', 'Task'
+    'Sent At', 'Reminder Date', 'Day', 'Task Ref', 'Row Number', 'Start', 'Task'
+  ]);
+  formatHeaderRow(sheet);
+}
+
+function createDynamicScheduleHeader(sheet) {
+  sheet.clear();
+  sheet.appendRow([
+    'Dynamic ID', 'Created At', 'Original Date', 'Schedule Date',
+    'Original Row', 'Original Start', 'Original Finish', 'Previous Task Ref',
+    'New Start', 'New Finish', 'State', 'Status', 'Task', 'Reason',
+    'Reschedule Count'
   ]);
   formatHeaderRow(sheet);
 }
@@ -1135,62 +1631,33 @@ function resetAllScheduleColors() {
   });
 }
 
-/** Sends the next upcoming task immediately for testing. */
+/** Sends the next upcoming effective task immediately for testing. */
 function testNextUpcomingReminder() {
-  const sheet = SpreadsheetApp
-    .getActiveSpreadsheet()
-    .getSheetByName(CONFIG.SHEET_NAME);
-
-  if (!sheet) throw new Error(`Sheet not found: ${CONFIG.SHEET_NAME}`);
-
-  const data = sheet.getDataRange().getDisplayValues();
-  const headers = data[0].map(value => cleanCell(value));
-  const startCol = headers.indexOf('Start');
-  const finishCol = headers.indexOf('Finish');
-  const stateCol = headers.indexOf('State');
-  const todayName = getTodayColumnName();
-  const todayCol = headers.indexOf(todayName);
   const now = getNowInConfiguredTimezone();
-  const candidates = [];
+  const dateKey = formatDateKey(now);
+  const candidates = getEffectiveTasksForDate(dateKey)
+    .map(item => ({ ...item, startDateTime: combineDateKeyWithTime(dateKey, item.start) }))
+    .filter(item => item.startDateTime > now)
+    .sort((a, b) => a.startDateTime - b.startDateTime);
 
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    const startTime = cleanCell(row[startCol]);
-    const finishTime = cleanCell(row[finishCol]);
-    const state = cleanCell(row[stateCol]);
-    const task = cleanCell(row[todayCol]);
-
-    if (isEmptyTask(startTime) || isEmptyTask(finishTime) || isEmptyTask(task)) {
-      continue;
-    }
-
-    const startDateTime = combineTodayWithTime(startTime, now);
-    let finishDateTime = combineTodayWithTime(finishTime, now);
-
-    if (finishDateTime <= startDateTime) {
-      finishDateTime.setDate(finishDateTime.getDate() + 1);
-    }
-
-    if (startDateTime > now) {
-      candidates.push({
-        rowNumber: i + 1,
-        startDateTime,
-        start: formatTime(startDateTime),
-        finish: formatTime(finishDateTime),
-        state,
-        task
-      });
-    }
-  }
-
-  candidates.sort((a, b) => a.startDateTime.getTime() - b.startDateTime.getTime());
-
-  if (candidates.length === 0) {
+  if (!candidates.length) {
     sendTelegramMessage('⚠️ No upcoming task was found for today.');
     return;
   }
 
-  sendSingleUpcomingTaskReminder(todayName, candidates[0]);
+  sendSingleUpcomingTaskReminder(getWeekdayNameForDate(now), candidates[0]);
+}
+
+function testSmartReschedule() {
+  const now = getNowInConfiguredTimezone();
+  const dateKey = formatDateKey(now);
+  const candidates = getEffectiveTasksForDate(dateKey)
+    .map(item => ({ ...item, startDateTime: combineDateKeyWithTime(dateKey, item.start) }))
+    .filter(item => item.startDateTime > now)
+    .sort((a, b) => a.startDateTime - b.startDateTime);
+
+  if (!candidates.length) throw new Error('No upcoming task was found.');
+  rescheduleTaskToNearestFreeTime(candidates[0].taskRef);
 }
 
 function testTelegram() {
@@ -1218,19 +1685,7 @@ function getNowInConfiguredTimezone() {
 }
 
 function getTodayColumnName() {
-  const dayNumber = Number(
-    Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'u')
-  );
-
-  return {
-    1: 'Monday',
-    2: 'Tuesday',
-    3: 'Wednesday',
-    4: 'Thursday',
-    5: 'Friday',
-    6: 'Saturday',
-    7: 'Sunday'
-  }[dayNumber];
+  return getWeekdayNameForDate(new Date());
 }
 
 function combineTodayWithTime(timeValue, baseDate) {
@@ -1266,6 +1721,38 @@ function parseTimeString(timeString) {
   }
 
   return { hours, minutes };
+}
+
+function formatDateKey(date) {
+  return Utilities.formatDate(date, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+}
+
+function parseDateKey(dateKey) {
+  const parts = String(dateKey).split('-').map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) {
+    throw new Error(`Invalid date key: ${dateKey}`);
+  }
+  return new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
+}
+
+function getWeekdayNameForDate(date) {
+  const number = Number(Utilities.formatDate(date, CONFIG.TIMEZONE, 'u'));
+  return {
+    1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday',
+    5: 'Friday', 6: 'Saturday', 7: 'Sunday'
+  }[number];
+}
+
+function combineDateKeyWithTime(dateKey, timeValue) {
+  const date = parseDateKey(dateKey);
+  const parsed = parseTimeString(timeValue);
+  date.setHours(parsed.hours, parsed.minutes, 0, 0);
+  return date;
+}
+
+function roundDateUpToMinutes(date, stepMinutes) {
+  const stepMs = stepMinutes * 60000;
+  return new Date(Math.ceil(date.getTime() / stepMs) * stepMs);
 }
 
 function calculateDurationMinutes(startTime, finishTime) {

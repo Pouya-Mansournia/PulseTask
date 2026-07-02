@@ -32,7 +32,7 @@ flowchart LR
 - Sends tasks individually instead of grouping several tasks together
 - Checks the schedule every five minutes
 - Prevents duplicate reminders using `Reminder_Log`
-- Inline actions: Done, Skip, Start, Pause, Later 30m
+- Inline actions: Done, Skip, Start, Pause, Later 30m, and Smart Reschedule
 - Direct energy buttons from 1 to 5
 - Fast Telegram feedback before spreadsheet work begins
 - Daily and seven-day analytics
@@ -47,6 +47,9 @@ flowchart LR
 - Cloudflare Secrets and Apps Script Properties instead of committed credentials
 - Automatic task-cell status colors
 - Serverless operation without a VPS
+- Smart dynamic rescheduling to the nearest available free time
+- Searches future availability without modifying the weekly schedule template
+- Stores rescheduled tasks in `Dynamic_Schedule`
 
 ## How task reminders work
 
@@ -83,6 +86,100 @@ For example:
 Each task is sent only once per day.
 
 The previous four-hour grouped-reminder model is not used in the current version.
+
+
+## Smart dynamic rescheduling
+
+PulseTask can automatically move a task to the nearest available free time.
+
+This is useful when an unexpected event, phone call, meeting, or interruption prevents the user from completing the current task.
+
+Each Telegram task card includes:
+
+```text
+🔄 Reschedule to Free Time
+```
+
+The smart rescheduling workflow is:
+
+```mermaid
+flowchart TD
+    U[User clicks Reschedule] --> W[Cloudflare Worker]
+    W -->|Immediate confirmation| T[Telegram]
+    W -->|Background request| A[Google Apps Script]
+    A --> D[Calculate task duration]
+    D --> B[Read static and dynamic busy intervals]
+    B --> F[Find nearest valid free slot]
+    F --> S[Store task in Dynamic_Schedule]
+    S --> N[Send new schedule time to Telegram]
+```
+
+The system:
+
+1. Calculates the original task duration.
+2. Reads the weekly schedule for the selected date.
+3. Reads active tasks from `Dynamic_Schedule`.
+4. Excludes the task currently being moved.
+5. Adds a configurable buffer around busy intervals.
+6. Searches for the nearest available slot.
+7. Checks free time after the final task of the day.
+8. Searches future days if no valid slot exists today.
+9. Stores the new task as a dynamic override.
+10. Sends a confirmation message with the new time.
+
+Example response:
+
+```text
+✅ Task Rescheduled
+
+📌 Prepare Elevator Pitch
+▪️ Category: Deep Work
+
+Previous: 2026-07-02, 14:00–15:00
+New: Today, 17:05–18:05
+
+A new reminder will be sent one hour before the rescheduled task.
+```
+
+### Rescheduling configuration
+
+The main Apps Script configuration includes:
+
+```javascript
+RESCHEDULE_DAY_START: '06:00',
+RESCHEDULE_DAY_END: '23:00',
+RESCHEDULE_BUFFER_MINUTES: 5,
+RESCHEDULE_STEP_MINUTES: 5,
+RESCHEDULE_SEARCH_DAYS: 7
+```
+
+Meaning:
+
+| Setting | Purpose |
+|---|---|
+| `RESCHEDULE_DAY_START` | Earliest allowed rescheduled start time |
+| `RESCHEDULE_DAY_END` | Latest allowed end-of-day search boundary |
+| `RESCHEDULE_BUFFER_MINUTES` | Buffer before and after busy tasks |
+| `RESCHEDULE_STEP_MINUTES` | Time rounding interval |
+| `RESCHEDULE_SEARCH_DAYS` | Number of future days to search |
+
+The weekly schedule template is never modified by this feature.
+
+Instead, rescheduled tasks are stored in:
+
+```text
+Dynamic_Schedule
+```
+
+When PulseTask checks reminders, it combines:
+
+```text
+Weekly schedule
++
+Active Dynamic_Schedule tasks
+-
+Static tasks overridden by a reschedule
+```
 
 ## Repository structure
 
@@ -182,6 +279,7 @@ Apps Script automatically creates and manages:
 - `Action_Log`
 - `Mood_Log`
 - `Reminder_Log`
+- `Dynamic_Schedule`
 - `Weekly_Report`
 - `Energy_Heatmap`
 
@@ -230,6 +328,54 @@ Day
 Row Number
 Start
 Task
+```
+
+
+### Dynamic_Schedule
+
+Stores all tasks that were moved by the smart rescheduling engine.
+
+The original weekly schedule remains unchanged. A rescheduled task is stored as a dynamic override with its own unique task reference.
+
+Example columns:
+
+```text
+Dynamic ID
+Created At
+Original Date
+Schedule Date
+Original Row
+Original Start
+Original Finish
+Previous Task Ref
+New Start
+New Finish
+State
+Status
+Task
+Reason
+Reschedule Count
+```
+
+Possible statuses include:
+
+```text
+Active
+Completed
+Skipped
+Superseded
+```
+
+A dynamic task reference looks like:
+
+```text
+D20260702-R12-V1
+```
+
+A static schedule task reference looks like:
+
+```text
+S12
 ```
 
 ### Weekly_Report
@@ -782,6 +928,7 @@ Each reminder contains:
 ⏱ Start
 ⏸ Pause
 🔁 Later
+🔄 Reschedule to Free Time
 🔥1
 🔥2
 🔥3
@@ -799,8 +946,9 @@ done:12
 skip:12
 start:12
 pause:12
-later30:12
-energyval:12:4
+later30:S12
+reschedule:S12
+energyval:S12:4
 report:today
 report:week
 report:heatmap
@@ -940,6 +1088,57 @@ Heatmap colors:
 | 4 | Light green |
 | 5 | Green |
 
+
+## Initialize the complete system
+
+Apps Script functions are executed individually. The full project is initialized by running:
+
+```javascript
+initializePulseTask
+```
+
+This function:
+
+- Validates required configuration values
+- Verifies the main schedule sheet
+- Checks required schedule headers
+- Creates missing generated sheets
+- Preserves existing logs and schedule data
+- Installs the reminder and weekly-report triggers
+- Builds the initial seven-day heatmap
+- Sends a successful initialization message to Telegram
+
+Run it from:
+
+```text
+Apps Script
+→ Select function: initializePulseTask
+→ Run
+```
+
+For a completely clean start:
+
+```text
+1. Run fullResetSystem
+2. Run initializePulseTask
+3. Run testNextUpcomingReminder
+4. Send /test in Telegram
+5. Test Smart Reschedule
+```
+
+`fullResetSystem` deletes and recreates generated system sheets and resets task colors, but it does not delete the weekly schedule.
+
+Generated sheets:
+
+```text
+Action_Log
+Mood_Log
+Reminder_Log
+Dynamic_Schedule
+Weekly_Report
+Energy_Heatmap
+```
+
 ## Operational notes
 
 - Telegram webhook must point only to the Cloudflare Worker.
@@ -1017,6 +1216,42 @@ Check that:
 - The same schedule row and start time are not duplicated.
 - Only one reminder trigger exists.
 
+
+### Smart Reschedule reports no suitable free time
+
+Check:
+
+- `RESCHEDULE_DAY_END` is late enough
+- `RESCHEDULE_SEARCH_DAYS` is greater than zero
+- The current task is excluded from the busy interval list
+- Free time after the final task of the day is checked
+- Dynamic tasks with status `Active` are loaded correctly
+- The required duration fits inside the available slot
+- Buffer time is not larger than the available gap
+
+Recommended defaults:
+
+```javascript
+RESCHEDULE_DAY_START: '06:00',
+RESCHEDULE_DAY_END: '23:00',
+RESCHEDULE_BUFFER_MINUTES: 5,
+RESCHEDULE_STEP_MINUTES: 5,
+RESCHEDULE_SEARCH_DAYS: 7
+```
+
+To test directly from Apps Script:
+
+```javascript
+testSmartReschedule
+```
+
+To test from Telegram:
+
+```text
+/test
+→ Click Reschedule to Free Time
+```
+
 ### Telegram buttons are slow
 
 Check that:
@@ -1088,6 +1323,7 @@ Before publishing the repository:
 - Verify `.gitignore`
 - Check Worker logs before sharing screenshots
 - Confirm the repository contains no real shared secret
+- Confirm `Dynamic_Schedule` contains no private task data before publishing screenshots
 
 ## License
 

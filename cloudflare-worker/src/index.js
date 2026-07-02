@@ -1,14 +1,7 @@
 /**
- * Telegram Life Tracker — Cloudflare Worker
+ * PulseTask — Cloudflare Worker
  *
- * Responsibilities:
- * - Receive Telegram webhook updates
- * - Validate the allowed chat ID
- * - Acknowledge inline-button clicks immediately
- * - Continue Google Sheets processing through Apps Script in the background
- * - Expose /start, /test, /today, /week, and /heatmap commands
- *
- * Required Cloudflare secrets:
+ * Required secrets:
  * - TELEGRAM_BOT_TOKEN
  * - TELEGRAM_CHAT_ID
  * - APPS_SCRIPT_URL
@@ -20,7 +13,8 @@ export default {
     if (request.method === "GET") {
       return Response.json({
         ok: true,
-        service: "Telegram Life Tracker Worker",
+        service: "PulseTask Telegram Worker",
+        version: "2.0-smart-reschedule",
       });
     }
 
@@ -40,9 +34,6 @@ export default {
         await handleIncomingMessage(update.message, env, ctx);
       }
 
-      // Always return HTTP 200 after parsing a Telegram update.
-      // This prevents Telegram from retrying the same update because
-      // an internal background operation failed.
       return Response.json({ ok: true });
     } catch (error) {
       console.error("Webhook error:", error);
@@ -68,14 +59,12 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
     return;
   }
 
-  // This is the critical UX step: Telegram receives confirmation first.
   await answerCallbackQuery(env, callbackId, parsed.confirmation);
 
-  // The slower Google Sheets work continues after the user receives feedback.
   ctx.waitUntil(
     sendToAppsScript(env, {
       action: parsed.action,
-      rowNumber: parsed.rowNumber,
+      taskRef: parsed.taskRef,
       energyValue: parsed.energyValue,
       callbackId,
       telegramChatId: chatId,
@@ -88,37 +77,41 @@ function parseCallbackData(data) {
   const parts = data.split(":");
   const action = parts[0];
 
-  if (["done", "skip", "start", "pause", "later30"].includes(action)) {
-    const rowNumber = Number(parts[1]);
+  if (
+    ["done", "skip", "start", "pause", "later30", "reschedule"].includes(
+      action
+    )
+  ) {
+    const taskRef = normalizeTaskRef(parts[1]);
 
-    if (!Number.isInteger(rowNumber) || rowNumber < 2) {
-      return { ok: false, message: "Invalid task row." };
+    if (!isValidTaskRef(taskRef)) {
+      return { ok: false, message: "Invalid task reference." };
     }
 
     const confirmations = {
-      done: "✅ Done logged.",
-      skip: "⏭ Skip logged.",
-      start: "⏱ Start logged.",
-      pause: "⏸ Pause logged.",
-      later30: "🔁 Later 30m logged.",
+      done: "✅ Task marked as done.",
+      skip: "⏭ Task marked as skipped.",
+      start: "⏱ Task started.",
+      pause: "⏸ Task paused.",
+      later30: "🔁 Task postponed for 30 minutes.",
+      reschedule: "🔄 Finding the nearest free time...",
     };
 
     return {
       ok: true,
       action,
-      rowNumber,
+      taskRef,
       energyValue: null,
       confirmation: confirmations[action],
     };
   }
 
   if (action === "energyval") {
-    const rowNumber = Number(parts[1]);
+    const taskRef = normalizeTaskRef(parts[1]);
     const energyValue = Number(parts[2]);
 
     if (
-      !Number.isInteger(rowNumber) ||
-      rowNumber < 2 ||
+      !isValidTaskRef(taskRef) ||
       !Number.isInteger(energyValue) ||
       energyValue < 1 ||
       energyValue > 5
@@ -129,9 +122,9 @@ function parseCallbackData(data) {
     return {
       ok: true,
       action: "energy",
-      rowNumber,
+      taskRef,
       energyValue,
-      confirmation: `🔥 Energy ${energyValue}/5 logged.`,
+      confirmation: `🔥 Energy level ${energyValue}/5 was recorded.`,
     };
   }
 
@@ -142,9 +135,9 @@ function parseCallbackData(data) {
       return {
         ok: true,
         action: "report_today",
-        rowNumber: null,
+        taskRef: null,
         energyValue: null,
-        confirmation: "📊 Preparing today's report...",
+        confirmation: "📊 Today’s report is being prepared.",
       };
     }
 
@@ -152,9 +145,9 @@ function parseCallbackData(data) {
       return {
         ok: true,
         action: "report_week",
-        rowNumber: null,
+        taskRef: null,
         energyValue: null,
-        confirmation: "📈 Preparing the weekly report...",
+        confirmation: "📈 The weekly report is being prepared.",
       };
     }
 
@@ -162,14 +155,29 @@ function parseCallbackData(data) {
       return {
         ok: true,
         action: "heatmap",
-        rowNumber: null,
+        taskRef: null,
         energyValue: null,
-        confirmation: "🟩 Preparing the heatmap...",
+        confirmation: "🟩 The energy heatmap is being updated.",
       };
     }
   }
 
   return { ok: false, message: "Unknown action." };
+}
+
+function normalizeTaskRef(value) {
+  const raw = String(value || "").trim();
+
+  // Backward compatibility with old callback data such as done:12.
+  if (/^\d+$/.test(raw)) {
+    return `S${raw}`;
+  }
+
+  return raw;
+}
+
+function isValidTaskRef(taskRef) {
+  return /^(S\d+|D[A-Za-z0-9-]+)$/.test(taskRef);
 }
 
 async function handleIncomingMessage(message, env, ctx) {
@@ -183,13 +191,13 @@ async function handleIncomingMessage(message, env, ctx) {
       env,
       chatId,
       [
-        "Hi 👋",
+        "Hello 👋",
         "",
-        "Telegram Life Tracker is online.",
+        "PulseTask is online.",
         "",
         "/test — Send test buttons",
-        "/today — Today report",
-        "/week — Weekly report",
+        "/today — Generate today’s report",
+        "/week — Generate the weekly report",
         "/heatmap — Update the energy heatmap",
       ].join("\n")
     );
@@ -202,44 +210,74 @@ async function handleIncomingMessage(message, env, ctx) {
   }
 
   if (text.startsWith("/today")) {
-    await sendTelegramMessage(env, chatId, "📊 Preparing today's report...");
-    ctx.waitUntil(sendToAppsScript(env, { action: "report_today", createdAt: new Date().toISOString() }));
+    await sendTelegramMessage(
+      env,
+      chatId,
+      "📊 Today’s report is being prepared."
+    );
+    ctx.waitUntil(
+      sendToAppsScript(env, {
+        action: "report_today",
+        createdAt: new Date().toISOString(),
+      })
+    );
     return;
   }
 
   if (text.startsWith("/week")) {
-    await sendTelegramMessage(env, chatId, "📈 Preparing the weekly report...");
-    ctx.waitUntil(sendToAppsScript(env, { action: "report_week", createdAt: new Date().toISOString() }));
+    await sendTelegramMessage(
+      env,
+      chatId,
+      "📈 The weekly report is being prepared."
+    );
+    ctx.waitUntil(
+      sendToAppsScript(env, {
+        action: "report_week",
+        createdAt: new Date().toISOString(),
+      })
+    );
     return;
   }
 
   if (text.startsWith("/heatmap")) {
-    await sendTelegramMessage(env, chatId, "🟩 Preparing the heatmap...");
-    ctx.waitUntil(sendToAppsScript(env, { action: "heatmap", createdAt: new Date().toISOString() }));
+    await sendTelegramMessage(
+      env,
+      chatId,
+      "🟩 The energy heatmap is being updated."
+    );
+    ctx.waitUntil(
+      sendToAppsScript(env, {
+        action: "heatmap",
+        createdAt: new Date().toISOString(),
+      })
+    );
   }
 }
 
-/**
- * Sends a manual test card.
- * Change TEST_ROW to a row that contains a task in today's schedule column.
- */
 async function sendTestTask(env, chatId) {
   const TEST_ROW = 12;
+  const taskRef = `S${TEST_ROW}`;
 
   const keyboard = {
     inline_keyboard: [
       [
-        { text: "✅ Done", callback_data: `done:${TEST_ROW}` },
-        { text: "⏭ Skip", callback_data: `skip:${TEST_ROW}` },
+        { text: "✅ Done", callback_data: `done:${taskRef}` },
+        { text: "⏭ Skip", callback_data: `skip:${taskRef}` },
       ],
       [
-        { text: "⏱ Start", callback_data: `start:${TEST_ROW}` },
-        { text: "⏸ Pause", callback_data: `pause:${TEST_ROW}` },
-        { text: "🔁 Later", callback_data: `later30:${TEST_ROW}` },
+        { text: "⏱ Start", callback_data: `start:${taskRef}` },
+        { text: "⏸ Pause", callback_data: `pause:${taskRef}` },
+        { text: "🔁 Later", callback_data: `later30:${taskRef}` },
+      ],
+      [
+        {
+          text: "🔄 Reschedule to Free Time",
+          callback_data: `reschedule:${taskRef}`,
+        },
       ],
       [1, 2, 3, 4, 5].map((value) => ({
         text: `🔥${value}`,
-        callback_data: `energyval:${TEST_ROW}:${value}`,
+        callback_data: `energyval:${taskRef}:${value}`,
       })),
       [
         { text: "📊 Today", callback_data: "report:today" },
@@ -252,7 +290,7 @@ async function sendTestTask(env, chatId) {
   await callTelegramApi(env, "sendMessage", {
     chat_id: chatId,
     text: [
-      "🧪 Cloudflare + Google Sheets Test",
+      "🧪 PulseTask Smart Reschedule Test",
       "",
       `Test schedule row: ${TEST_ROW}`,
       "Change TEST_ROW in src/index.js if this row is empty today.",
@@ -274,6 +312,7 @@ async function sendToAppsScript(env, actionData) {
         ...actionData,
       }),
       signal: controller.signal,
+      redirect: "follow",
     });
 
     const responseText = await response.text();
@@ -282,11 +321,15 @@ async function sendToAppsScript(env, actionData) {
     try {
       result = JSON.parse(responseText);
     } catch {
-      throw new Error(`Apps Script returned non-JSON: ${responseText.slice(0, 200)}`);
+      throw new Error(
+        `Apps Script returned non-JSON: ${responseText.slice(0, 200)}`
+      );
     }
 
     if (!response.ok || !result.ok) {
-      throw new Error(result.error || `Apps Script HTTP error: ${response.status}`);
+      throw new Error(
+        result.error || `Apps Script HTTP error: ${response.status}`
+      );
     }
 
     console.log("Apps Script action completed:", JSON.stringify(result));
@@ -297,7 +340,7 @@ async function sendToAppsScript(env, actionData) {
     await sendTelegramMessage(
       env,
       env.TELEGRAM_CHAT_ID,
-      `⚠️ Google Sheet update failed.\n\n${error.message}`
+      `⚠️ The Google Sheets operation failed.\n\n${error.message}`
     );
 
     throw error;
@@ -334,7 +377,9 @@ async function callTelegramApi(env, method, payload) {
   const result = await response.json();
 
   if (!response.ok || !result.ok) {
-    throw new Error(`Telegram ${method} failed: ${result.description || response.status}`);
+    throw new Error(
+      `Telegram ${method} failed: ${result.description || response.status}`
+    );
   }
 
   return result;
