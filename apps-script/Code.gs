@@ -355,10 +355,117 @@ function markTaskAsPaused(taskRef) {
 }
 
 function markTaskAsLater(taskRef, minutes) {
-  const taskInfo = getTaskInfoByRef(taskRef);
-  if (!taskInfo.ok) throw new Error(taskInfo.message);
-  saveTaskAction(taskInfo, `Later ${minutes}m`, 'cloudflare later button');
-  setTaskCellStatusColor(taskInfo.originalRow, 'skipped');
+  const delayMinutes = Math.max(1, Number(minutes) || 30);
+  return postponeTaskByMinutes_(taskRef, delayMinutes);
+}
+
+/**
+ * Moves a task to the nearest available slot after a requested delay.
+ * Unlike the previous implementation, this creates a real dynamic override.
+ */
+function postponeTaskByMinutes_(taskRef, delayMinutes) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) throw new Error(taskInfo.message);
+
+    const now = getNowInConfiguredTimezone();
+    const durationMinutes = calculateDurationMinutes(taskInfo.start, taskInfo.finish);
+
+    if (durationMinutes <= 0) {
+      throw new Error('Task duration could not be calculated.');
+    }
+
+    const notBefore = roundDateUpToMinutes(
+      new Date(now.getTime() + delayMinutes * 60000),
+      CONFIG.RESCHEDULE_STEP_MINUTES
+    );
+
+    const slot = findNearestFreeSlot(
+      taskInfo,
+      durationMinutes,
+      now,
+      CONFIG.RESCHEDULE_SEARCH_DAYS,
+      notBefore
+    );
+
+    if (!slot) {
+      saveTaskAction(taskInfo, `Later ${delayMinutes}m Failed`, 'real postpone');
+      sendTelegramMessage([
+        '⚠️ The task could not be postponed.',
+        '',
+        `📌 ${taskInfo.task}`,
+        `⏱ Required duration: ${formatMinutes(durationMinutes)}`,
+        `🔁 Requested delay: ${delayMinutes} minutes`,
+        '',
+        `The system searched the next ${CONFIG.RESCHEDULE_SEARCH_DAYS} day(s).`
+      ].join('\n'));
+      return null;
+    }
+
+    if (taskInfo.isDynamic) {
+      setDynamicTaskStatus(taskInfo.dynamicSheetRow, 'Superseded');
+    }
+
+    const originalDate = taskInfo.originalDate || taskInfo.dateKey;
+    const count = getNextRescheduleCount(taskInfo.originalRow, originalDate);
+    const dynamicId = `${slot.dateKey.replace(/-/g, '')}-R${taskInfo.originalRow}-V${count}`;
+    const originalTimes = taskInfo.isDynamic
+      ? getOriginalTimes(taskInfo)
+      : { start: taskInfo.start, finish: taskInfo.finish };
+
+    appendDynamicScheduleRow({
+      dynamicId: dynamicId,
+      originalDate: originalDate,
+      scheduleDate: slot.dateKey,
+      originalRow: taskInfo.originalRow,
+      originalStart: originalTimes.start,
+      originalFinish: originalTimes.finish,
+      previousTaskRef: taskRef,
+      newStart: slot.start,
+      newFinish: slot.finish,
+      state: taskInfo.state,
+      task: taskInfo.task,
+      status: 'Active',
+      reason: `Postponed ${delayMinutes} minutes`,
+      rescheduleCount: count
+    });
+
+    const newTaskRef = `D${dynamicId}`;
+
+    saveActionLog({
+      action: `Later ${delayMinutes}m`,
+      taskRef: newTaskRef,
+      rowNumber: taskInfo.originalRow,
+      day: slot.dayName,
+      start: slot.start,
+      finish: slot.finish,
+      state: taskInfo.state,
+      task: taskInfo.task,
+      commandType: `from ${taskInfo.dateKey} ${taskInfo.start}-${taskInfo.finish}`
+    }, false);
+
+    setTaskCellStatusColor(taskInfo.originalRow, 'paused');
+
+    const dateLabel = slot.dateKey === formatDateKey(now) ? 'Today' : slot.dateKey;
+    sendTelegramMessage([
+      `✅ Task postponed by ${delayMinutes} minutes`,
+      '',
+      `📌 ${taskInfo.task}`,
+      !isEmptyTask(taskInfo.state) ? `▪️ Category: ${taskInfo.state}` : '',
+      '',
+      `Previous: ${taskInfo.dateKey}, ${taskInfo.start}–${taskInfo.finish}`,
+      `New: ${dateLabel}, ${slot.start}–${slot.finish}`,
+      '',
+      'A new reminder will be sent one hour before the task.'
+    ].filter(Boolean).join('\n'));
+
+    return { ...slot, taskRef: newTaskRef };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function markTaskEnergy(taskRef, energyValue) {
@@ -678,7 +785,8 @@ function findNearestFreeSlot(
   taskInfo,
   durationMinutes,
   now,
-  searchDays
+  searchDays,
+  minimumStart
 ) {
   if (!taskInfo || !taskInfo.taskRef) {
     throw new Error('Task information is missing.');
@@ -708,11 +816,18 @@ function findNearestFreeSlot(
     let earliest = new Date(dayStart);
 
     if (dayOffset === 0) {
+      const defaultEarliest = new Date(
+        now.getTime() + CONFIG.RESCHEDULE_BUFFER_MINUTES * 60000
+      );
+
+      const requestedEarliest = minimumStart instanceof Date
+        ? minimumStart
+        : defaultEarliest;
+
       earliest = roundDateUpToMinutes(
-        new Date(
-          now.getTime() +
-          CONFIG.RESCHEDULE_BUFFER_MINUTES * 60000
-        ),
+        requestedEarliest > defaultEarliest
+          ? requestedEarliest
+          : defaultEarliest,
         CONFIG.RESCHEDULE_STEP_MINUTES
       );
 
@@ -1880,6 +1995,41 @@ function pad2(value) {
   return String(value).padStart(2, '0');
 }
 
+
+/**
+ * Runs lightweight internal checks without modifying schedule data.
+ */
+function runPulseTaskTests() {
+  const results = [];
+
+  function assert_(name, condition) {
+    if (!condition) throw new Error(`Test failed: ${name}`);
+    results.push(`✅ ${name}`);
+  }
+
+  const time24 = parseTimeString('17:30');
+  assert_('24-hour time parsing', time24.hours === 17 && time24.minutes === 30);
+
+  const time12 = parseTimeString('6:30 PM');
+  assert_('12-hour time parsing', time12.hours === 18 && time12.minutes === 30);
+
+  assert_('normal duration', calculateDurationMinutes('09:00', '10:30') === 90);
+  assert_('cross-midnight duration', calculateDurationMinutes('23:30', '00:30') === 60);
+  assert_('static task reference', /^(S\d+)$/.test('S12'));
+  assert_('dynamic task reference', /^(D[A-Za-z0-9-]+)$/.test('D20260702-R12-V1'));
+
+  const start = combineDateKeyWithTime('2026-07-02', '09:00');
+  const end = combineDateKeyWithTime('2026-07-02', '18:00');
+  const intervals = [{
+    start: combineDateKeyWithTime('2026-07-02', '09:00'),
+    finish: combineDateKeyWithTime('2026-07-02', '11:00')
+  }];
+  const gap = findGapInIntervals(start, end, 60, intervals, 5);
+  assert_('free-slot detection', gap && formatTime(gap.start) === '11:05');
+
+  Logger.log(results.join('\n'));
+  return results;
+}
 
 /**
  * Reads a Script Property and falls back to a safe placeholder/default.

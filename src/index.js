@@ -10,6 +10,23 @@
 
 export default {
   async fetch(request, env, ctx) {
+    const missingEnvironment = getMissingEnvironmentVariables(env);
+
+    if (missingEnvironment.length > 0) {
+      console.error(
+        `Missing Worker environment variables: ${missingEnvironment.join(", ")}`
+      );
+
+      return Response.json(
+        {
+          ok: false,
+          error: "Worker configuration is incomplete.",
+          missing: missingEnvironment,
+        },
+        { status: 500 }
+      );
+    }
+
     if (request.method === "GET") {
       return Response.json({
         ok: true,
@@ -60,6 +77,18 @@ export default {
     }
   },
 };
+
+/**
+ * Returns required Worker variables that are missing or empty.
+ */
+function getMissingEnvironmentVariables(env) {
+  return [
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "APPS_SCRIPT_URL",
+    "WORKER_API_SECRET",
+  ].filter((key) => !String(env[key] || "").trim());
+}
 
 /**
  * Handles Telegram inline button callbacks.
