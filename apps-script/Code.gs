@@ -1,13 +1,13 @@
 const CONFIG = {
   // Telegram credentials
-  BOT_TOKEN: 'PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE',
-  CHAT_ID: 'PUT_YOUR_TELEGRAM_CHAT_ID_HERE',
+  BOT_TOKEN: getScriptPropertyOrFallback_('TELEGRAM_BOT_TOKEN', 'PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE'),
+  CHAT_ID: getScriptPropertyOrFallback_('TELEGRAM_CHAT_ID', 'PUT_YOUR_TELEGRAM_CHAT_ID_HERE'),
 
   // Must exactly match WORKER_API_SECRET stored in Cloudflare
-  WORKER_API_SECRET: 'PUT_YOUR_LONG_SHARED_SECRET_HERE',
+  WORKER_API_SECRET: getScriptPropertyOrFallback_('WORKER_API_SECRET', 'PUT_YOUR_LONG_SHARED_SECRET_HERE'),
 
   // Main schedule sheet
-  SHEET_NAME: 'Sheet1',
+  SHEET_NAME: getScriptPropertyOrFallback_('MAIN_SHEET_NAME', 'Sheet1'),
 
   // Generated sheets
   ACTION_LOG_SHEET_NAME: 'Action_Log',
@@ -18,7 +18,7 @@ const CONFIG = {
   DYNAMIC_SCHEDULE_SHEET_NAME: 'Dynamic_Schedule',
 
   // Time configuration
-  TIMEZONE: 'Asia/Tehran',
+  TIMEZONE: getScriptPropertyOrFallback_('TIMEZONE', 'Asia/Tehran'),
 
   // Reminder configuration
   REMINDER_MINUTES_BEFORE: 60,
@@ -1878,4 +1878,127 @@ function getDateList(startDate, endDate) {
 
 function pad2(value) {
   return String(value).padStart(2, '0');
+}
+
+
+/**
+ * Reads a Script Property and falls back to a safe placeholder/default.
+ * Real credentials must be stored in Apps Script Project Settings.
+ */
+function getScriptPropertyOrFallback_(key, fallbackValue) {
+  const value = PropertiesService.getScriptProperties().getProperty(key);
+  return value === null || value === undefined || String(value).trim() === ''
+    ? fallbackValue
+    : String(value).trim();
+}
+
+/**
+ * Initializes the complete PulseTask system without deleting existing data.
+ */
+function initializePulseTask() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    validatePulseTaskConfiguration_();
+    ensureGeneratedSheetsExist_();
+    installProjectTriggers();
+    buildEnergyHeatmapSheet(7);
+
+    sendTelegramMessage([
+      '✅ PulseTask initialized successfully.',
+      '',
+      'Created or verified:',
+      '• Action_Log',
+      '• Mood_Log',
+      '• Reminder_Log',
+      '• Dynamic_Schedule',
+      '• Weekly_Report',
+      '• Energy_Heatmap',
+      '',
+      'Installed triggers:',
+      '• Task reminder check every 5 minutes',
+      '• Weekly report every Friday',
+      '',
+      'Smart rescheduling is ready.'
+    ].join('\n'));
+
+    Logger.log('PulseTask initialization completed successfully.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Validates configuration, the main sheet, and required headers. */
+function validatePulseTaskConfiguration_() {
+  const requiredValues = {
+    TELEGRAM_BOT_TOKEN: CONFIG.BOT_TOKEN,
+    TELEGRAM_CHAT_ID: CONFIG.CHAT_ID,
+    WORKER_API_SECRET: CONFIG.WORKER_API_SECRET,
+    MAIN_SHEET_NAME: CONFIG.SHEET_NAME,
+    TIMEZONE: CONFIG.TIMEZONE
+  };
+
+  Object.keys(requiredValues).forEach(key => {
+    const value = cleanCell(requiredValues[key]);
+
+    if (!value || value.startsWith('PUT_') || value.startsWith('YOUR_')) {
+      throw new Error(`Missing or invalid Script Property: ${key}`);
+    }
+  });
+
+  const mainSheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName(CONFIG.SHEET_NAME);
+
+  if (!mainSheet) {
+    throw new Error(`Main schedule sheet not found: ${CONFIG.SHEET_NAME}`);
+  }
+
+  const headers = mainSheet
+    .getRange(1, 1, 1, mainSheet.getLastColumn())
+    .getDisplayValues()[0]
+    .map(value => cleanCell(value));
+
+  const requiredHeaders = [
+    'Start',
+    'Finish',
+    'State',
+    'Saturday',
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday'
+  ];
+
+  const missingHeaders = requiredHeaders.filter(header => !headers.includes(header));
+
+  if (missingHeaders.length > 0) {
+    throw new Error(`Missing schedule headers: ${missingHeaders.join(', ')}`);
+  }
+}
+
+/** Creates only missing generated sheets and preserves all existing data. */
+function ensureGeneratedSheetsExist_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const sheetDefinitions = [
+    [CONFIG.ACTION_LOG_SHEET_NAME, createActionLogHeader],
+    [CONFIG.MOOD_LOG_SHEET_NAME, createMoodLogHeader],
+    [CONFIG.REMINDER_LOG_SHEET_NAME, createReminderLogHeader],
+    [CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME, createDynamicScheduleHeader],
+    [CONFIG.WEEKLY_REPORT_SHEET_NAME, createWeeklyReportHeader],
+    [CONFIG.ENERGY_HEATMAP_SHEET_NAME, createEnergyHeatmapHeader]
+  ];
+
+  sheetDefinitions.forEach(([sheetName, headerFunction]) => {
+    let sheet = ss.getSheetByName(sheetName);
+
+    if (!sheet) {
+      sheet = ss.insertSheet(sheetName);
+      headerFunction(sheet);
+    }
+  });
 }
