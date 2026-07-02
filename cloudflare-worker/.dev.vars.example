@@ -1,0 +1,5 @@
+# Local development only. Never commit a real .dev.vars file.
+TELEGRAM_BOT_TOKEN=replace_me
+TELEGRAM_CHAT_ID=replace_me
+APPS_SCRIPT_URL=https://script.google.com/macros/s/REPLACE_ME/exec
+WORKER_API_SECRET=replace_with_the_same_secret_used_in_apps_script
