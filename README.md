@@ -2,7 +2,7 @@
 
 A fast, serverless Telegram productivity and wellbeing tracker powered by **Cloudflare Workers**, **Google Apps Script**, and **Google Sheets**.
 
-The project turns a weekly schedule spreadsheet into an interactive Telegram assistant. It sends upcoming tasks, records task status, captures energy levels, produces daily and weekly analytics, and builds an hourly energy heatmap.
+The project turns a weekly schedule spreadsheet into an interactive Telegram assistant. It sends each upcoming task approximately one hour before it begins, records task status, captures energy levels, produces daily and weekly analytics, and builds an hourly energy heatmap.
 
 ## Why this architecture?
 
@@ -17,17 +17,21 @@ flowchart LR
     W -->|Immediate answerCallbackQuery| T
     W -->|Background HTTPS request| A[Google Apps Script Web App]
     A --> S[Google Sheets]
-    A -->|Scheduled messages and reports| T
+    A -->|Scheduled reminders and reports| T
 ```
 
 - **Cloudflare Worker** handles Telegram webhooks and acknowledges button clicks immediately.
-- **Google Apps Script** handles spreadsheet operations, analytics, scheduled reminders, and heatmap generation.
-- **Google Sheets** stores the schedule, actions, energy logs, reports, and heatmap.
-- No VPS is required, and the user's computer does not need to stay on.
+- **Google Apps Script** handles spreadsheet operations, analytics, scheduled reminders, reports, and heatmap generation.
+- **Google Sheets** stores the schedule, actions, reminder history, energy logs, reports, and heatmap.
+- No VPS is required.
+- The user's computer does not need to remain online after deployment.
 
 ## Features
 
-- Sends the next four hours of today's schedule to Telegram
+- Sends each task approximately one hour before its scheduled start time
+- Sends tasks individually instead of grouping several tasks together
+- Checks the schedule every five minutes
+- Prevents duplicate reminders using `Reminder_Log`
 - Inline actions: Done, Skip, Start, Pause, Later 30m
 - Direct energy buttons from 1 to 5
 - Fast Telegram feedback before spreadsheet work begins
@@ -38,9 +42,47 @@ flowchart LR
 - Best energy hour
 - Hour-by-hour energy heatmap
 - Friday-night weekly report
-- Duplicate Done/Skip protection
+- Duplicate Done and Skip protection
 - Shared-secret authentication between Worker and Apps Script
-- Script Properties and Cloudflare Secrets instead of committed credentials
+- Cloudflare Secrets and Apps Script Properties instead of committed credentials
+- Automatic task-cell status colors
+- Serverless operation without a VPS
+
+## How task reminders work
+
+Google Apps Script checks the schedule every five minutes.
+
+For every task, it calculates whether the task will start approximately one hour later.
+
+```text
+Current time
+    ↓
+Add 60 minutes
+    ↓
+Find tasks starting within the reminder window
+    ↓
+Check Reminder_Log
+    ↓
+Send only tasks that have not already been sent
+```
+
+Because Apps Script time-based triggers are not guaranteed to run at an exact second, the default reminder window is:
+
+```text
+55 to 65 minutes before the task starts
+```
+
+For example:
+
+| Task start | Expected reminder |
+|---|---|
+| 09:00 | Approximately 08:00 |
+| 13:30 | Approximately 12:30 |
+| 18:00 | Approximately 17:00 |
+
+Each task is sent only once per day.
+
+The previous four-hour grouped-reminder model is not used in the current version.
 
 ## Repository structure
 
@@ -86,7 +128,8 @@ telegram-life-tracker-cloudflare/
 - A Cloudflare account
 - Node.js 22 or newer
 - npm
-- A Google Sheet containing the schedule columns described below
+- A Google Sheet containing the required schedule columns
+- PowerShell, Terminal, or another command-line environment
 
 ## Main schedule schema
 
@@ -98,125 +141,610 @@ Start | Finish | Time Duration | State | Saturday | Sunday | Monday | Tuesday | 
 
 Example:
 
-| Start | Finish | State | Monday | Tuesday |
-|---|---|---|---|---|
-| 06:30 | 08:30 | Health/GYM | Gym | Gym |
-| 09:00 | 11:00 | Deep Work | Product design | Research |
+| Start | Finish | Time Duration | State | Monday | Tuesday |
+|---|---|---|---|---|---|
+| 06:30 | 08:30 | 02:00 | Health/GYM | Gym | Gym |
+| 09:00 | 11:00 | 02:00 | Deep Work | Product design | Research |
+| 13:00 | 14:00 | 01:00 | Learning | Read a paper | Online course |
 
-Blank cells, `-`, `—`, `N/A`, and `NA` are ignored.
+The following values are ignored:
+
+```text
+Blank cells
+-
+—
+N/A
+NA
+null
+undefined
+```
+
+Supported time formats include:
+
+```text
+06:30
+6:30
+17:30
+6:30 AM
+11:30 PM
+```
+
+Tasks crossing midnight are also supported:
+
+```text
+23:30 → 05:30
+```
 
 ## Generated sheets
 
-Apps Script automatically creates:
+Apps Script automatically creates and manages:
 
 - `Action_Log`
 - `Mood_Log`
+- `Reminder_Log`
 - `Weekly_Report`
 - `Energy_Heatmap`
 
+### Action_Log
+
+Stores task interactions:
+
+```text
+Pending
+Done
+Skipped
+Started
+Paused
+Later 30m
+Energy 1/5
+Energy 2/5
+Energy 3/5
+Energy 4/5
+Energy 5/5
+```
+
+### Mood_Log
+
+Stores:
+
+- Energy level
+- Mood label
+- Task
+- Category
+- Date
+- Hour
+- Source
+
+### Reminder_Log
+
+Stores every successfully sent task reminder.
+
+It prevents the same task from being sent repeatedly when the five-minute trigger runs again.
+
+Example columns:
+
+```text
+Sent At
+Reminder Date
+Day
+Row Number
+Start
+Task
+```
+
+### Weekly_Report
+
+Stores calculated weekly performance metrics.
+
+### Energy_Heatmap
+
+Displays average hourly energy levels for the last seven days.
+
 ## Quick start
 
-For full instructions, read [docs/SETUP.md](docs/SETUP.md).
+For more detailed instructions, see:
 
-### 1. Create the Telegram bot
+```text
+docs/SETUP.md
+```
 
-1. Open `@BotFather` in Telegram.
-2. Run `/newbot`.
-3. Save the bot token securely.
-4. Send `/start` to your new bot.
-5. Retrieve your numeric chat ID.
+## 1. Create a Telegram bot with BotFather
 
-Never commit the bot token.
+Telegram bots must be created through the official Telegram bot-management account:
 
-### 2. Prepare the Google Sheet
+```text
+@BotFather
+```
 
-Create the required schedule headers and add your weekly tasks. Open:
+### Create the bot
+
+1. Open Telegram.
+2. Search for `@BotFather`.
+3. Confirm that the account is the official verified BotFather.
+4. Open the conversation.
+5. Send:
+
+```text
+/start
+```
+
+6. Send:
+
+```text
+/newbot
+```
+
+7. BotFather asks for a display name.
+
+Example:
+
+```text
+PulseTask
+```
+
+8. BotFather asks for a username.
+
+The username must end with `bot`.
+
+Examples:
+
+```text
+PulseTaskBot
+pouya_pulse_task_bot
+my_life_tracker_bot
+```
+
+9. BotFather returns a token similar to:
+
+```text
+1234567890:AAExampleTokenValue
+```
+
+This is your:
+
+```text
+TELEGRAM_BOT_TOKEN
+```
+
+Never publish or commit this token.
+
+### Start your new bot
+
+Open the newly created bot and send:
+
+```text
+/start
+```
+
+This is necessary before the bot can send messages to your personal chat.
+
+### Optional BotFather configuration
+
+You can configure the bot using these BotFather commands:
+
+```text
+/setdescription
+/setabouttext
+/setuserpic
+/setcommands
+```
+
+Recommended bot commands:
+
+```text
+start - Show bot help
+test - Send test buttons
+today - Generate today's report
+week - Generate the weekly report
+heatmap - Update the energy heatmap
+```
+
+### Revoke an exposed token
+
+If the bot token is ever pasted publicly, committed to GitHub, included in a screenshot, or shared accidentally:
+
+1. Open `@BotFather`.
+2. Send:
+
+```text
+/revoke
+```
+
+3. Select the affected bot.
+4. Generate a new token.
+5. Update the Cloudflare secret.
+6. Redeploy the Worker.
+
+Never continue using an exposed token.
+
+## 2. Retrieve your Telegram chat ID
+
+Before setting the Telegram webhook, send `/start` to your bot.
+
+Then run:
+
+```powershell
+$BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+
+Invoke-RestMethod `
+  -Uri "https://api.telegram.org/bot$BOT_TOKEN/getUpdates"
+```
+
+Look for:
+
+```text
+message
+  chat
+    id
+```
+
+Example:
+
+```json
+{
+  "message": {
+    "chat": {
+      "id": 123456789
+    }
+  }
+}
+```
+
+The numeric value is your:
+
+```text
+TELEGRAM_CHAT_ID
+```
+
+For a personal bot, this value is usually a positive integer.
+
+## 3. Prepare the Google Sheet
+
+Create a Google Sheet and add the required schedule headers:
+
+```text
+Start
+Finish
+Time Duration
+State
+Saturday
+Sunday
+Monday
+Tuesday
+Wednesday
+Thursday
+Friday
+```
+
+Add your weekly tasks below the header row.
+
+Open:
 
 ```text
 Extensions → Apps Script
 ```
 
-Paste the contents of `apps-script/Code.gs` into the Apps Script editor.
+Replace the default Apps Script code with the contents of:
 
-### 3. Set Apps Script properties
+```text
+apps-script/Code.gs
+```
+
+Save the project.
+
+## 4. Configure the Apps Script project timezone
 
 Open:
 
 ```text
-Apps Script → Project Settings → Script Properties
+Apps Script
+→ Project Settings
+→ Time zone
 ```
 
-Create:
+Choose the timezone matching the schedule.
+
+Example:
+
+```text
+Asia/Tehran
+```
+
+The Apps Script project timezone and configured application timezone should match.
+
+## 5. Configure Apps Script properties
+
+Open:
+
+```text
+Apps Script
+→ Project Settings
+→ Script Properties
+```
+
+Create the following properties:
 
 | Property | Value |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | Numeric Telegram chat ID |
+| `TELEGRAM_BOT_TOKEN` | Token received from BotFather |
+| `TELEGRAM_CHAT_ID` | Numeric personal Telegram chat ID |
 | `WORKER_API_SECRET` | A long random shared secret |
-| `MAIN_SHEET_NAME` | Usually `Sheet1` |
+| `MAIN_SHEET_NAME` | Usually `Sheet1` or `Schedule` |
 | `TIMEZONE` | Example: `Asia/Tehran` |
 
-The `WORKER_API_SECRET` must exactly match the Cloudflare secret configured later.
-
-### 4. Deploy Apps Script as a Web App
-
-Use:
+Example shared secret format:
 
 ```text
-Deploy → New deployment → Web app
+pulse-task-2026-7Kx9Qm2Vf4Nz8Rp1
+```
+
+The value does not come from Telegram or Cloudflare. You create it yourself.
+
+It must be:
+
+- Long
+- Random
+- Private
+- Identical in Apps Script and Cloudflare
+
+Do not place a real secret in source code committed to GitHub.
+
+## 6. Authorize Apps Script
+
+Before deployment, run one test function manually from the Apps Script editor:
+
+```javascript
+testTelegram
+```
+
+Google may ask you to authorize access to:
+
+- Google Sheets
+- External network requests
+- Apps Script triggers
+
+Complete the authorization process using the Google account that owns the spreadsheet.
+
+## 7. Deploy Apps Script as a Web App
+
+Open:
+
+```text
+Deploy
+→ New deployment
+→ Web app
+```
+
+Configure:
+
+```text
 Execute as: Me
 Who has access: Anyone
 ```
 
-Copy the URL ending in `/exec`.
+Click Deploy.
 
-### 5. Install and deploy the Worker
+Copy the generated URL ending in:
+
+```text
+/exec
+```
+
+Example:
+
+```text
+https://script.google.com/macros/s/DEPLOYMENT_ID/exec
+```
+
+Do not use the `/dev` URL.
+
+The `/exec` URL becomes:
+
+```text
+APPS_SCRIPT_URL
+```
+
+After changing Apps Script code:
+
+```text
+Deploy
+→ Manage deployments
+→ Edit
+→ New version
+→ Deploy
+```
+
+## 8. Install the Cloudflare Worker
+
+Open a terminal and enter the Worker directory:
 
 ```powershell
 cd cloudflare-worker
+```
+
+Install dependencies:
+
+```powershell
 npm install
+```
+
+Authenticate Wrangler:
+
+```powershell
 npx wrangler login
+```
+
+## 9. Configure Cloudflare secrets
+
+Run each command separately:
+
+```powershell
 npx wrangler secret put TELEGRAM_BOT_TOKEN
+```
+
+Paste the token received from BotFather.
+
+```powershell
 npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+Paste the numeric Telegram chat ID.
+
+```powershell
 npx wrangler secret put APPS_SCRIPT_URL
+```
+
+Paste the Apps Script `/exec` URL.
+
+```powershell
 npx wrangler secret put WORKER_API_SECRET
+```
+
+Paste the same shared secret configured in Apps Script.
+
+Required Worker secrets:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+APPS_SCRIPT_URL
+WORKER_API_SECRET
+```
+
+## 10. Deploy the Cloudflare Worker
+
+Run:
+
+```powershell
 npx wrangler deploy
 ```
 
-Enter the Apps Script `/exec` URL for `APPS_SCRIPT_URL`.
+Wrangler returns a Worker URL similar to:
 
-### 6. Point Telegram webhook to the Worker
+```text
+https://telegram-life-tracker.YOUR-SUBDOMAIN.workers.dev
+```
+
+Save this URL.
+
+You can test its health endpoint by opening it in a browser.
+
+Expected response:
+
+```json
+{
+  "ok": true,
+  "service": "Telegram Life Tracker Worker"
+}
+```
+
+## 11. Point the Telegram webhook to Cloudflare Worker
+
+The Telegram webhook must point only to the Cloudflare Worker.
+
+It must not point directly to Apps Script.
 
 In PowerShell:
 
 ```powershell
-$BOT_TOKEN = "YOUR_NEW_BOT_TOKEN"
+$BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 $WORKER_URL = "https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev"
-Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" -Method Post -ContentType "application/json" -Body (@{url=$WORKER_URL; drop_pending_updates=$true} | ConvertTo-Json)
+
+Invoke-RestMethod `
+  -Uri "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body (@{
+    url = $WORKER_URL
+    drop_pending_updates = $true
+  } | ConvertTo-Json)
 ```
 
-Verify:
+Expected result:
+
+```text
+ok          : True
+result      : True
+description : Webhook was set
+```
+
+Verify the webhook:
 
 ```powershell
-Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
+Invoke-RestMethod `
+  -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
 ```
 
-### 7. Install Apps Script triggers
+The returned URL must match the Cloudflare Worker URL.
 
-Run this Apps Script function once:
+## 12. Install Apps Script triggers
+
+From the Apps Script editor, select and run:
 
 ```javascript
 installProjectTriggers
 ```
 
+Run it only once during initial setup or after changing trigger configuration.
+
 It creates:
 
-- `sendNext4HoursPlanToTelegram` every four hours
-- `sendWeeklyWellbeingReport` every Friday around 23:45 in the project timezone
+```text
+checkUpcomingTaskReminders
+→ Every 5 minutes
 
-### 8. Test
+sendWeeklyWellbeingReport
+→ Every Friday around 23:45
+```
 
-Send to the Telegram bot:
+The reminder trigger checks whether any task begins approximately one hour later.
+
+It does not send multiple upcoming tasks as a four-hour bundle.
+
+The old trigger below must not remain active:
+
+```text
+sendNext4HoursPlanToTelegram
+```
+
+The installation function removes old project triggers before creating the current ones.
+
+You can also verify triggers manually:
+
+```text
+Apps Script
+→ Triggers
+```
+
+## 13. Test the one-hour reminder
+
+To test without waiting until a task is exactly one hour away, run:
+
+```javascript
+testNextUpcomingReminder
+```
+
+This sends the nearest upcoming task for the current day immediately.
+
+To test the real reminder timing conditions, run:
+
+```javascript
+testReminderChecker
+```
+
+This sends a message only when a task begins within the configured reminder window.
+
+Default configuration:
+
+```text
+Reminder time: 60 minutes before task
+Reminder window: ±5 minutes
+Trigger frequency: every 5 minutes
+```
+
+## 14. Test Telegram commands
+
+Send these commands to your bot:
 
 ```text
 /start
@@ -226,45 +754,127 @@ Send to the Telegram bot:
 /heatmap
 ```
 
-Change `TEST_ROW` in `cloudflare-worker/src/index.js` if row 12 is empty today.
-
-## Security model
-
-Two separate secret stores are used:
-
-### Cloudflare Secrets
-
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `APPS_SCRIPT_URL`
-- `WORKER_API_SECRET`
-
-### Apps Script Properties
-
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `WORKER_API_SECRET`
-- `MAIN_SHEET_NAME`
-- `TIMEZONE`
-
-The shared secret authenticates Worker-to-Apps-Script calls. The Worker also rejects updates from chat IDs other than the configured user.
-
-## Telegram commands
+Expected behavior:
 
 | Command | Result |
 |---|---|
-| `/start` | Shows help and current commands |
+| `/start` | Shows help and available commands |
 | `/test` | Sends a test task card |
-| `/today` | Requests today's report |
-| `/week` | Requests the last seven days report |
+| `/today` | Generates today's analytics report |
+| `/week` | Generates the last seven days report |
 | `/heatmap` | Rebuilds the seven-day energy heatmap |
+
+Change `TEST_ROW` in:
+
+```text
+cloudflare-worker/src/index.js
+```
+
+if the default test row has no task for the current day.
+
+## Task reminder buttons
+
+Each reminder contains:
+
+```text
+✅ Done
+⏭ Skip
+⏱ Start
+⏸ Pause
+🔁 Later
+🔥1
+🔥2
+🔥3
+🔥4
+🔥5
+📊 Today
+📈 Week
+🟩 Heatmap
+```
+
+Example callback data:
+
+```text
+done:12
+skip:12
+start:12
+pause:12
+later30:12
+energyval:12:4
+report:today
+report:week
+report:heatmap
+```
+
+## Task status colors
+
+The current weekday task cell changes color:
+
+| Status | Color |
+|---|---|
+| Pending | Light red |
+| Done | Light green |
+| Skipped | Light orange |
+| Started | Light blue |
+| Paused | Light purple |
+| Default | White |
+
+Recommended colors:
+
+```text
+Done     #b7e1cd
+Pending  #f4c7c3
+Skipped  #fce8b2
+Started  #cfe2f3
+Paused   #d9d2e9
+Default  #ffffff
+```
+
+## Security model
+
+Two separate secret stores are used.
+
+### Cloudflare Secrets
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+APPS_SCRIPT_URL
+WORKER_API_SECRET
+```
+
+### Apps Script Properties
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+WORKER_API_SECRET
+MAIN_SHEET_NAME
+TIMEZONE
+```
+
+The shared secret authenticates Worker-to-Apps-Script requests.
+
+The Worker also rejects Telegram updates from chat IDs other than the configured user.
+
+Never store real secrets in:
+
+```text
+README.md
+wrangler.jsonc
+source code
+Git commits
+screenshots
+issue reports
+.dev.vars.example
+```
 
 ## Analytics
 
 ### Completion rate
 
 ```text
-Done tasks / Pending tasks sent × 100
+Done tasks / Pending reminders sent × 100
 ```
 
 ### Productive time
@@ -273,48 +883,211 @@ The sum of planned durations for tasks marked Done.
 
 ### Average energy
 
-The arithmetic mean of all energy values logged in the selected date range.
+The arithmetic mean of all energy values logged during the selected period.
+
+### Best work category
+
+The category with the highest total planned duration among completed tasks.
 
 ### Best energy hour
 
-The date-hour bucket with the highest average energy value.
+The date-and-hour bucket with the highest average recorded energy value.
+
+## Daily report example
+
+```text
+📊 Today's Report
+🗓 Period: 2026-07-02 to 2026-07-02
+
+✅ Done: 2
+⏭ Skipped: 0
+⏳ Reminders Sent: 5
+⏱ Started: 1
+⏸ Paused: 0
+🔁 Postponed: 0
+
+🎯 Completion Rate: 40%
+⏱ Productive Time: 2h 15m
+🔥 Average Energy: 2/5
+
+🏆 Best Performing Category:
+Health/GYM — 2h
+
+🟩 Best Energy Time:
+2026-07-02 06:00 — Energy 2/5
+```
+
+## Energy heatmap
+
+Energy values use the following scale:
+
+| Energy | Meaning |
+|---|---|
+| 1 | Very Low |
+| 2 | Low |
+| 3 | Medium |
+| 4 | Good |
+| 5 | High |
+
+Heatmap colors:
+
+| Value | Color |
+|---|---|
+| Empty | White |
+| 1 | Red |
+| 2 | Orange |
+| 3 | Yellow |
+| 4 | Light green |
+| 5 | Green |
 
 ## Operational notes
 
 - Telegram webhook must point only to the Cloudflare Worker.
 - Apps Script is an authenticated backend endpoint, not the Telegram webhook.
+- Apps Script sends scheduled reminders and generated reports.
+- Cloudflare Worker handles interactive Telegram commands and buttons.
+- Button confirmation happens before spreadsheet processing.
+- `ctx.waitUntil()` allows spreadsheet operations to continue in the background.
 - After changing Apps Script code, deploy a new Apps Script Web App version.
-- After changing Worker code or secrets, run `npx wrangler deploy`.
-- The user computer may be off after deployment.
+- After changing Worker code or Cloudflare secrets, run:
+
+```powershell
+npx wrangler deploy
+```
+
+- The user's computer may remain off after deployment.
+- Cloudflare Worker, Telegram, Apps Script, and Google Sheets continue operating in the cloud.
 
 ## Troubleshooting
 
-Start Worker live logs:
+### Start Worker live logs
 
 ```powershell
 npx wrangler tail
 ```
 
-Check Telegram webhook:
+Then click a Telegram button or send a command.
+
+### Check Telegram webhook
 
 ```powershell
-Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
+Invoke-RestMethod `
+  -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
 ```
 
-Open the Apps Script `/exec` URL in a browser. It should return a JSON health response.
+### Test Apps Script health endpoint
 
-See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed cases.
+Open the Apps Script `/exec` URL in a browser.
+
+Expected response:
+
+```json
+{
+  "ok": true,
+  "service": "PulseTask Apps Script API"
+}
+```
+
+### Reminder is not sent
+
+Check:
+
+- The trigger `checkUpcomingTaskReminders` exists.
+- The trigger runs every five minutes.
+- The project timezone is correct.
+- The schedule weekday header is correct.
+- The task start time is valid.
+- The current task was not already recorded in `Reminder_Log`.
+- The task begins within approximately 55 to 65 minutes.
+
+Run:
+
+```javascript
+testNextUpcomingReminder
+```
+
+to verify Telegram delivery without waiting.
+
+### Reminder is sent repeatedly
+
+Check that:
+
+- `Reminder_Log` exists.
+- The reminder row is successfully added after sending.
+- The same schedule row and start time are not duplicated.
+- Only one reminder trigger exists.
+
+### Telegram buttons are slow
+
+Check that:
+
+- The Telegram webhook points to Cloudflare Worker.
+- `answerCallbackQuery` is called before Apps Script processing.
+- Spreadsheet processing is running through `ctx.waitUntil()`.
+- Telegram webhook does not point directly to Apps Script.
+
+### Apps Script returns HTML instead of JSON
+
+Possible causes:
+
+- The `/dev` URL was used.
+- Deployment access is incorrect.
+- A login page was returned.
+
+Use:
+
+```text
+Execute as: Me
+Who has access: Anyone
+```
+
+and use the URL ending in `/exec`.
+
+### Worker reports missing environment variables
+
+Confirm these Cloudflare secrets exist:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+APPS_SCRIPT_URL
+WORKER_API_SECRET
+```
+
+### Bot does not respond
+
+Check:
+
+1. You sent `/start` to the new bot.
+2. The bot token is current.
+3. The bot token was not revoked.
+4. The webhook points to the deployed Worker.
+5. The configured chat ID is correct.
+6. Worker logs do not contain Telegram API errors.
+
+See:
+
+```text
+docs/TROUBLESHOOTING.md
+```
+
+for additional cases.
 
 ## Open-source readiness checklist
 
-Before publishing:
+Before publishing the repository:
 
 - Revoke any token that has ever been pasted publicly
 - Confirm no token exists in Git history
 - Confirm `.dev.vars` is ignored
 - Confirm only placeholders exist in examples
-- Replace personal names and chat IDs in screenshots
-- Add repository screenshots only after removing sensitive data
+- Remove personal chat IDs
+- Remove personal deployment URLs
+- Replace personal names in screenshots
+- Remove Apps Script deployment IDs from screenshots
+- Verify `.gitignore`
+- Check Worker logs before sharing screenshots
+- Confirm the repository contains no real shared secret
 
 ## License
 
