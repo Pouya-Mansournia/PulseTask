@@ -1811,6 +1811,7 @@ function buildReportForDateRange(startDate, endDate) {
   const energyValues = [];
   const hourlyEnergy = {};
   const categoryTotals = {};
+  const categoryBreakdown = {};
 
   actionRows.forEach(row => {
     if (!isDateInRange(row.actionDate, startDate, endDate)) return;
@@ -1831,12 +1832,48 @@ function buildReportForDateRange(startDate, endDate) {
       stateMinutes[stateName] = (stateMinutes[stateName] || 0) + duration;
       categoryTotals[stateName] = (categoryTotals[stateName] || 0) + duration;
 
+      if (!categoryBreakdown[stateName]) {
+        categoryBreakdown[stateName] = {
+          category: stateName,
+          plannedMinutes: 0,
+          actualMinutes: 0,
+          completedTasks: 0,
+          skippedTasks: 0,
+          unplannedTasks: 0
+        };
+      }
+
+      categoryBreakdown[stateName].plannedMinutes += plannedDuration;
+      categoryBreakdown[stateName].actualMinutes += duration;
+      categoryBreakdown[stateName].completedTasks += 1;
+
       if (String(row.taskType || '').toLowerCase() === 'unplanned' || String(row.source || '').toLowerCase() === 'telegram') {
+        categoryBreakdown[stateName].unplannedTasks += 1;
         unplannedMinutes += duration;
       }
     }
 
-    if (row.action === 'Skipped') uniqueSkipped[taskKey] = true;
+    if (row.action === 'Skipped' && !uniqueSkipped[taskKey]) {
+      uniqueSkipped[taskKey] = true;
+
+      const stateName = row.state || 'Uncategorized';
+      if (!categoryBreakdown[stateName]) {
+        categoryBreakdown[stateName] = {
+          category: stateName,
+          plannedMinutes: 0,
+          actualMinutes: 0,
+          completedTasks: 0,
+          skippedTasks: 0,
+          unplannedTasks: 0
+        };
+      }
+
+      categoryBreakdown[stateName].skippedTasks += 1;
+
+      if (String(row.taskType || '').toLowerCase() === 'unplanned' || String(row.source || '').toLowerCase() === 'telegram') {
+        categoryBreakdown[stateName].unplannedTasks += 1;
+      }
+    }
     if (row.action === 'Started') started++;
     if (row.action === 'Paused') paused++;
     if (String(row.action).startsWith('Later')) later++;
@@ -1906,6 +1943,22 @@ function buildReportForDateRange(startDate, endDate) {
     lines.push('', '📂 Time by category:', categorySummary);
   }
 
+  const categoryRows = Object.keys(categoryBreakdown)
+    .map(name => {
+      const entry = categoryBreakdown[name];
+      const denominator = entry.completedTasks + entry.skippedTasks;
+      return {
+        category: entry.category,
+        plannedMinutes: entry.plannedMinutes,
+        actualMinutes: entry.actualMinutes,
+        completedTasks: entry.completedTasks,
+        skippedTasks: entry.skippedTasks,
+        unplannedTasks: entry.unplannedTasks,
+        completionRate: denominator > 0 ? Math.round((entry.completedTasks / denominator) * 100) : 0
+      };
+    })
+    .sort((a, b) => b.actualMinutes - a.actualMinutes);
+
   return {
     startDate,
     endDate,
@@ -1924,6 +1977,7 @@ function buildReportForDateRange(startDate, endDate) {
     bestState,
     bestHour,
     categoryTotals,
+    categoryBreakdown: categoryRows,
     message: lines.join('\n')
   };
 }
@@ -1960,6 +2014,23 @@ function saveWeeklyReport(report) {
     report.bestHour.label || '',
     report.bestHour.energy || ''
   ]);
+
+  sheet.appendRow(['Category Breakdown', '', '', '', '', '', '']);
+  sheet.appendRow(['Category', 'Planned Minutes', 'Actual Minutes', 'Completed Tasks', 'Skipped Tasks', 'Unplanned Tasks', 'Completion Rate']);
+
+  (report.categoryBreakdown || []).forEach(item => {
+    sheet.appendRow([
+      item.category || '',
+      item.plannedMinutes || 0,
+      item.actualMinutes || 0,
+      item.completedTasks || 0,
+      item.skippedTasks || 0,
+      item.unplannedTasks || 0,
+      `${item.completionRate || 0}%`
+    ]);
+  });
+
+  sheet.appendRow([]);
 }
 
 function buildEnergyHeatmapSheet(days) {

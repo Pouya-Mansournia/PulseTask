@@ -66,6 +66,20 @@ flowchart LR
 
 For local testing, keep secrets in [cloudflare-worker/.dev.vars](cloudflare-worker/.dev.vars). Use [cloudflare-worker/.dev.vars.example](cloudflare-worker/.dev.vars.example) as a template.
 
+## Telegram task creation
+
+You can create unplanned tasks directly from Telegram.
+
+Examples:
+
+```text
+/add 18:30-20:00 | PulseTask | Improve Telegram integration
+/add 90m | Research | Read robotics paper
+/add now-20:00 | Development | Update README
+```
+
+Normal text also works. The bot will show a preview first and wait for your confirmation before saving the task.
+
 Do not place real tokens or secrets in:
 
 - source code
