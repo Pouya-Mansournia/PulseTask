@@ -77,6 +77,7 @@ function getMissingEnvironmentVariables(env) {
 async function handleCallbackQuery(callbackQuery, env, ctx) {
   const callbackId = callbackQuery.id;
   const chatId = String(callbackQuery.message?.chat?.id || "");
+  const messageId = callbackQuery.message?.message_id;
   const data = String(callbackQuery.data || "").trim();
 
   if (chatId !== String(env.TELEGRAM_CHAT_ID)) {
@@ -94,7 +95,7 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
   await answerCallbackQuery(env, callbackId, parsed.confirmation);
 
   ctx.waitUntil(
-    sendToAppsScript(env, {
+    processCallbackAction(env, parsed, chatId, messageId, {
       action: parsed.action,
       draftId: parsed.draftId,
       taskRef: parsed.taskRef,
@@ -104,6 +105,23 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
       createdAt: new Date().toISOString(),
     })
   );
+}
+
+async function processCallbackAction(env, parsed, chatId, messageId, actionData) {
+  const result = await sendToAppsScript(env, actionData);
+
+  if (parsed.draftId && messageId) {
+    try {
+      await callTelegramApi(env, "deleteMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+      });
+    } catch (error) {
+      console.error("Could not delete the completed draft message:", error);
+    }
+  }
+
+  return result;
 }
 
 function parseCallbackData(data) {
@@ -201,9 +219,9 @@ function parseCallbackData(data) {
     }
 
     const confirmations = {
-      taskconfirm: "✅ Task added.",
-      taskstart: "▶️ Task added and started.",
-      taskcancel: "❌ Draft cancelled.",
+      taskconfirm: "⏳ Adding task...",
+      taskstart: "⏳ Adding and starting task...",
+      taskcancel: "⏳ Cancelling draft...",
     };
 
     return {
