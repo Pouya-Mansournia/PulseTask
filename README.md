@@ -1,18 +1,29 @@
 # PulseTask
 
-A personal, serverless Telegram productivity and wellbeing system powered by **Cloudflare Workers**, **Google Apps Script**, and **Google Sheets**.
+PulseTask is a personal, serverless productivity assistant that connects Telegram, Google Apps Script, and Google Sheets.
 
-PulseTask turns a weekly Google Sheets schedule into an interactive Telegram assistant. It sends reminders, records task actions and energy levels, creates daily and weekly reports, generates an energy heatmap, and moves interrupted tasks to the nearest available free time.
+It turns a weekly plan in Google Sheets into an interactive Telegram experience. The bot can remind you before tasks, track what you actually did, record energy levels, and generate daily or weekly reports.
 
-This edition is intentionally designed for **one personal user**.
+This version is intentionally designed for a single personal user:
 
-- No VPS
-- No paid database
-- No separate backend server
-- No multi-user complexity
-- No computer required to remain online
+- no VPS
+- no paid database
+- no separate backend server
+- no multi-user setup
+- no always-on computer required
 
-## Architecture
+## Quick start
+
+1. Create a Telegram bot with BotFather and copy the bot token.
+2. Create or open your Google Sheet and install the Apps Script code.
+3. Add the required secrets in:
+   - Apps Script Script Properties
+   - Cloudflare Worker secrets
+   - a local [.dev.vars](cloudflare-worker/.dev.vars) file for development only
+4. Deploy the Apps Script Web App and the Cloudflare Worker.
+5. Set the Telegram webhook to your Worker URL.
+
+## How it works
 
 ```mermaid
 flowchart LR
@@ -33,26 +44,36 @@ flowchart LR
 
 ## Main features
 
-- Individual reminders approximately one hour before each task
-- Reminder check every five minutes
+- Reminders about one hour before each task
+- Reminder checks every five minutes
 - Duplicate reminder prevention
 - Done, Skip, Start, Pause, and Later actions
-- `Later 30m` creates a real rescheduled task
+- Later 30m creates a real rescheduled task
 - Smart rescheduling to the nearest valid free slot
-- Dynamic tasks can be completed, skipped, postponed, or rescheduled again
+- Dynamic tasks can be completed, postponed, or rescheduled again
 - Energy tracking from 1 to 5
 - Daily and seven-day reports
-- Productive-time calculation
-- Completion-rate calculation
-- Best work category
-- Best energy hour
+- Productive-time and completion-rate calculations
+- Best work category and best energy hour
 - Seven-day hourly energy heatmap
 - Weekly Friday report
 - Automatic task-cell status colors
 - Secure Worker-to-Apps-Script shared secret
-- Script Properties for credentials
 - Safe initialization without deleting existing data
 - Lightweight internal tests
+
+## Local development and secrets
+
+For local testing, keep secrets in [cloudflare-worker/.dev.vars](cloudflare-worker/.dev.vars). Use [cloudflare-worker/.dev.vars.example](cloudflare-worker/.dev.vars.example) as a template.
+
+Do not place real tokens or secrets in:
+
+- source code
+- README files
+- screenshots
+- Git history
+
+The repository is configured to ignore local secret files such as [.dev.vars](cloudflare-worker/.dev.vars) and [.env](.env).
 
 ## Repository files
 
