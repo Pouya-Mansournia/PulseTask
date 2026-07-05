@@ -243,19 +243,22 @@ async function handleIncomingMessage(message, env, ctx) {
   }
 
   if (text.startsWith("/start")) {
-    await sendTelegramMessage(env, chatId, [
-      "Hello 👋",
-      "",
-      "PulseTask is online.",
-      "",
-      "/add START-FINISH | CATEGORY | TASK",
-      "/add DURATION | CATEGORY | TASK",
-      "/today — Generate today’s report",
-      "/week — Generate the weekly report",
-      "/heatmap — Update the energy heatmap",
-      "/test — Send test buttons",
-      "/help — Show examples",
-    ].join("\n"));
+    await callTelegramApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: [
+        "Hello 👋",
+        "",
+        "PulseTask is online.",
+        "Use the ➕ Add Task button below whenever you want to add a task.",
+        "",
+        "/today — Generate today’s report",
+        "/week — Generate the weekly report",
+        "/heatmap — Update the energy heatmap",
+        "/test — Send test buttons",
+        "/help — Show examples",
+      ].join("\n"),
+      reply_markup: getMainMenuKeyboard(),
+    });
     return;
   }
 
@@ -295,6 +298,19 @@ async function handleIncomingMessage(message, env, ctx) {
         ],
       });
     }
+    return;
+  }
+
+  if (rawText === "➕ Add Task") {
+    await callTelegramApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: "📝 Send me the task description.",
+      reply_markup: {
+        force_reply: true,
+        input_field_placeholder: "Write your task...",
+        selective: true,
+      },
+    });
     return;
   }
 
@@ -353,6 +369,14 @@ async function handleIncomingMessage(message, env, ctx) {
       });
     }
   }
+}
+
+function getMainMenuKeyboard() {
+  return {
+    keyboard: [[{ text: "➕ Add Task" }]],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }
 
 async function sendTestTask(env, chatId) {
