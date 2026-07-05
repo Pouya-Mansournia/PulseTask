@@ -264,11 +264,11 @@ async function handleIncomingMessage(message, env, ctx) {
       "🧭 PulseTask help",
       "",
       "Examples:",
+      "/add Review PulseTask changes",
       "/add 18:30-20:00 | PulseTask | Improve Telegram integration",
       "/add 90m | Research | Read robotics paper",
-      "/add now-20:00 | Development | Update README",
       "",
-      "For normal text, I will create a draft with a 60-minute default duration.",
+      "You can also send plain text directly and I will suggest the next available free slot automatically.",
     ].join("\n"));
     return;
   }
@@ -423,18 +423,37 @@ async function sendToAppsScript(env, actionData) {
     }
 
     if (!response.ok || !result.ok) {
-      throw new Error(result.error || `Apps Script HTTP error: ${response.status}`);
+      throw new Error(result.error || result.message || `Apps Script HTTP error: ${response.status}`);
     }
 
     console.log("Apps Script action completed:", JSON.stringify(result));
     return result;
   } catch (error) {
     console.error("Apps Script background request failed:", error);
-    await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, ["⚠️ The Google Sheets operation failed.", "", error.message].join("\n"));
+    const friendlyMessage = formatAppsScriptError(error.message);
+    await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, friendlyMessage);
     throw error;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function formatAppsScriptError(message) {
+  const raw = String(message || "").trim();
+
+  if (!raw) {
+    return "⚠️ The operation could not be completed.";
+  }
+
+  if (/draft.*(expired|not found|no longer available)/i.test(raw)) {
+    return "⚠️ This draft is no longer available. Please create a new task.";
+  }
+
+  if (/usage:/i.test(raw)) {
+    return raw;
+  }
+
+  return ["⚠️ The operation could not be completed.", "", raw].join("\n");
 }
 
 async function answerCallbackQuery(env, callbackQueryId, text) {

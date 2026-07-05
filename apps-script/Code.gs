@@ -645,59 +645,137 @@ function parseTaskInputToDraft(rawInput, now, chatId) {
   if (/^\/add/i.test(input)) {
     const body = input.replace(/^\/add\s*/i, '').trim();
     if (!body) {
-      throw new Error('Usage: /add START-FINISH | CATEGORY | TASK');
+      throw new Error('Please send a task description after /add.');
     }
 
     const parts = body.split('|').map(value => cleanCell(value));
-    if (parts.length !== 3) {
-      throw new Error('Usage: /add START-FINISH | CATEGORY | TASK');
+
+    if (parts.length === 3) {
+      const timeSpec = parts[0];
+      const category = parts[1] || 'Uncategorized';
+      const task = parts[2];
+
+      if (!task) {
+        throw new Error('Task description is required.');
+      }
+
+      if (category.length > CONFIG.MAX_CATEGORY_LENGTH) {
+        throw new Error('Category is too long.');
+      }
+
+      if (task.length > CONFIG.MAX_TASK_LENGTH) {
+        throw new Error('Task is too long.');
+      }
+
+      const window = parseTaskWindowSpec(timeSpec, now);
+      return {
+        date: formatDateKey(now),
+        start: window.start,
+        finish: window.finish,
+        category: category,
+        task: task,
+        source: 'Telegram',
+        telegramChatId: chatId
+      };
     }
 
-    const timeSpec = parts[0];
-    const category = parts[1] || 'Uncategorized';
-    const task = parts[2];
+    if (parts.length === 2) {
+      const category = parts[0] || 'Uncategorized';
+      const task = parts[1];
 
-    if (!task) {
+      if (!task) {
+        throw new Error('Task description is required.');
+      }
+
+      if (category.length > CONFIG.MAX_CATEGORY_LENGTH) {
+        throw new Error('Category is too long.');
+      }
+
+      if (task.length > CONFIG.MAX_TASK_LENGTH) {
+        throw new Error('Task is too long.');
+      }
+
+      const slot = suggestNextFreeTaskSlot(now, CONFIG.DEFAULT_TASK_DURATION_MINUTES);
+      return {
+        date: slot.dateKey,
+        start: slot.start,
+        finish: slot.finish,
+        category: category,
+        task: task,
+        source: 'Telegram',
+        telegramChatId: chatId,
+        slotMode: 'suggested'
+      };
+    }
+
+    const taskText = parts[0];
+    if (!taskText) {
       throw new Error('Task description is required.');
     }
 
-    if (category.length > CONFIG.MAX_CATEGORY_LENGTH) {
-      throw new Error('Category is too long.');
-    }
-
-    if (task.length > CONFIG.MAX_TASK_LENGTH) {
+    if (taskText.length > CONFIG.MAX_TASK_LENGTH) {
       throw new Error('Task is too long.');
     }
 
-    const window = parseTaskWindowSpec(timeSpec, now);
+    const slot = suggestNextFreeTaskSlot(now, CONFIG.DEFAULT_TASK_DURATION_MINUTES);
     return {
-      date: formatDateKey(now),
-      start: window.start,
-      finish: window.finish,
-      category: category,
-      task: task,
+      date: slot.dateKey,
+      start: slot.start,
+      finish: slot.finish,
+      category: detectCategory(taskText),
+      task: taskText,
       source: 'Telegram',
-      telegramChatId: chatId
+      telegramChatId: chatId,
+      slotMode: 'suggested'
     };
   }
 
   const category = detectCategory(rawInput);
   const durationMinutes = CONFIG.DEFAULT_TASK_DURATION_MINUTES;
-  const startDate = new Date(now);
-  const finishDate = new Date(startDate.getTime() + durationMinutes * 60000);
 
   if (rawInput.length > CONFIG.MAX_TASK_LENGTH) {
     throw new Error('Task is too long.');
   }
 
+  const slot = suggestNextFreeTaskSlot(now, durationMinutes);
+
   return {
-    date: formatDateKey(now),
-    start: formatTime(startDate),
-    finish: formatTime(finishDate),
+    date: slot.dateKey,
+    start: slot.start,
+    finish: slot.finish,
     category: category,
     task: rawInput,
     source: 'Telegram',
-    telegramChatId: chatId
+    telegramChatId: chatId,
+    slotMode: 'suggested'
+  };
+}
+
+function suggestNextFreeTaskSlot(now, durationMinutes) {
+  const taskInfo = {
+    taskRef: 'AUTO',
+    dateKey: formatDateKey(now)
+  };
+
+  const slot = findNearestFreeSlot(
+    taskInfo,
+    durationMinutes,
+    now,
+    CONFIG.RESCHEDULE_SEARCH_DAYS,
+    new Date(now.getTime() + CONFIG.RESCHEDULE_BUFFER_MINUTES * 60000)
+  );
+
+  if (slot) {
+    return slot;
+  }
+
+  const fallbackStart = new Date(now.getTime() + CONFIG.RESCHEDULE_BUFFER_MINUTES * 60000);
+  const fallbackFinish = new Date(fallbackStart.getTime() + durationMinutes * 60000);
+
+  return {
+    dateKey: formatDateKey(now),
+    start: formatTime(fallbackStart),
+    finish: formatTime(fallbackFinish)
   };
 }
 
@@ -798,12 +876,15 @@ function buildDraftPreview(draft) {
   const dateLabel = draft.date || formatDateKey(new Date());
   const category = draft.category || 'Uncategorized';
   const task = draft.task || '';
+  const timeLabel = draft.slotMode === 'suggested'
+    ? `🕐 Suggested: ${draft.start}–${draft.finish}`
+    : `🕐 ${draft.start}–${draft.finish}`;
 
   return [
     '📝 New Unplanned Task',
     '',
     `🗓 ${dateLabel}`,
-    `🕐 ${draft.start}–${draft.finish}`,
+    timeLabel,
     `▪️ Category: ${category}`,
     '',
     '🔹 Task:',
@@ -820,7 +901,7 @@ function generateDraftId() {
 function confirmTaskDraft(draftId, startImmediately, chatId) {
   const cached = CacheService.getScriptCache().get(draftId);
   if (!cached) {
-    return { ok: false, error: 'The draft expired or was not found.' };
+    return { ok: false, error: 'This draft is no longer available. Please create a new task.' };
   }
 
   const draft = JSON.parse(cached);
@@ -847,7 +928,7 @@ function confirmTaskDraft(draftId, startImmediately, chatId) {
 function cancelTaskDraft(draftId, chatId) {
   const cached = CacheService.getScriptCache().get(draftId);
   if (!cached) {
-    return { ok: false, error: 'The draft expired or was not found.' };
+    return { ok: false, error: 'This draft is no longer available. Please create a new task.' };
   }
 
   const draft = JSON.parse(cached);
