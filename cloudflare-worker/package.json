@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail"
   },
