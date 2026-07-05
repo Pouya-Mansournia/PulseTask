@@ -661,6 +661,8 @@ Git history
 screenshots
 ```
 
+Keep secrets only in Apps Script Script Properties, Cloudflare Worker secrets, or local ignored files such as `.dev.vars` and `.env`.
+
 The Worker also rejects Telegram updates from chat IDs other than the configured personal chat ID.
 
 ## Troubleshooting

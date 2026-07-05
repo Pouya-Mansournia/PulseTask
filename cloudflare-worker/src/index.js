@@ -31,7 +31,7 @@ export default {
       return Response.json({
         ok: true,
         service: "PulseTask Telegram Worker",
-        version: "2.0-smart-reschedule",
+        version: "2.1-telegram-drafts",
       });
     }
 
@@ -51,36 +51,20 @@ export default {
       const update = await request.json();
 
       if (update.callback_query) {
-        await handleCallbackQuery(
-          update.callback_query,
-          env,
-          ctx
-        );
+        await handleCallbackQuery(update.callback_query, env, ctx);
       } else if (update.message?.text) {
-        await handleIncomingMessage(
-          update.message,
-          env,
-          ctx
-        );
+        await handleIncomingMessage(update.message, env, ctx);
       }
 
-      return Response.json({
-        ok: true,
-      });
+      return Response.json({ ok: true });
     } catch (error) {
       console.error("Webhook error:", error);
 
-      return Response.json({
-        ok: false,
-        error: error.message,
-      });
+      return Response.json({ ok: false, error: error.message });
     }
   },
 };
 
-/**
- * Returns required Worker variables that are missing or empty.
- */
 function getMissingEnvironmentVariables(env) {
   return [
     "TELEGRAM_BOT_TOKEN",
@@ -90,57 +74,29 @@ function getMissingEnvironmentVariables(env) {
   ].filter((key) => !String(env[key] || "").trim());
 }
 
-/**
- * Handles Telegram inline button callbacks.
- */
-async function handleCallbackQuery(
-  callbackQuery,
-  env,
-  ctx
-) {
+async function handleCallbackQuery(callbackQuery, env, ctx) {
   const callbackId = callbackQuery.id;
-
-  const chatId = String(
-    callbackQuery.message?.chat?.id || ""
-  );
-
-  const data = String(
-    callbackQuery.data || ""
-  ).trim();
+  const chatId = String(callbackQuery.message?.chat?.id || "");
+  const data = String(callbackQuery.data || "").trim();
 
   if (chatId !== String(env.TELEGRAM_CHAT_ID)) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "Not allowed."
-    );
-
+    await answerCallbackQuery(env, callbackId, "Not allowed.");
     return;
   }
 
   const parsed = parseCallbackData(data);
 
   if (!parsed.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      parsed.message
-    );
-
+    await answerCallbackQuery(env, callbackId, parsed.message);
     return;
   }
 
-  // Give the user immediate feedback.
-  await answerCallbackQuery(
-    env,
-    callbackId,
-    parsed.confirmation
-  );
+  await answerCallbackQuery(env, callbackId, parsed.confirmation);
 
-  // Continue Apps Script processing in the background.
   ctx.waitUntil(
     sendToAppsScript(env, {
       action: parsed.action,
+      draftId: parsed.draftId,
       taskRef: parsed.taskRef,
       energyValue: parsed.energyValue,
       callbackId: callbackId,
@@ -150,30 +106,17 @@ async function handleCallbackQuery(
   );
 }
 
-/**
- * Parses Telegram callback data.
- */
 function parseCallbackData(data) {
   const parts = data.split(":");
   const action = parts[0];
 
-  const taskActions = [
-    "done",
-    "skip",
-    "start",
-    "pause",
-    "later30",
-    "reschedule",
-  ];
+  const taskActions = ["done", "skip", "start", "pause", "later30", "reschedule"];
 
   if (taskActions.includes(action)) {
     const taskRef = normalizeTaskRef(parts[1]);
 
     if (!isValidTaskRef(taskRef)) {
-      return {
-        ok: false,
-        message: "Invalid task reference.",
-      };
+      return { ok: false, message: "Invalid task reference." };
     }
 
     const confirmations = {
@@ -182,13 +125,13 @@ function parseCallbackData(data) {
       start: "⏱ Task started.",
       pause: "⏸ Task paused.",
       later30: "🔁 Task postponed for 30 minutes.",
-      reschedule:
-        "🔄 Finding the nearest free time...",
+      reschedule: "🔄 Finding the nearest free time...",
     };
 
     return {
       ok: true,
       action: action,
+      draftId: null,
       taskRef: taskRef,
       energyValue: null,
       confirmation: confirmations[action],
@@ -199,25 +142,17 @@ function parseCallbackData(data) {
     const taskRef = normalizeTaskRef(parts[1]);
     const energyValue = Number(parts[2]);
 
-    if (
-      !isValidTaskRef(taskRef) ||
-      !Number.isInteger(energyValue) ||
-      energyValue < 1 ||
-      energyValue > 5
-    ) {
-      return {
-        ok: false,
-        message: "Invalid energy value.",
-      };
+    if (!isValidTaskRef(taskRef) || !Number.isInteger(energyValue) || energyValue < 1 || energyValue > 5) {
+      return { ok: false, message: "Invalid energy value." };
     }
 
     return {
       ok: true,
       action: "energy",
+      draftId: null,
       taskRef: taskRef,
       energyValue: energyValue,
-      confirmation:
-        `🔥 Energy level ${energyValue}/5 was recorded.`,
+      confirmation: `🔥 Energy level ${energyValue}/5 was recorded.`,
     };
   }
 
@@ -228,10 +163,10 @@ function parseCallbackData(data) {
       return {
         ok: true,
         action: "report_today",
+        draftId: null,
         taskRef: null,
         energyValue: null,
-        confirmation:
-          "📊 Today’s report is being prepared.",
+        confirmation: "📊 Today’s report is being prepared.",
       };
     }
 
@@ -239,10 +174,10 @@ function parseCallbackData(data) {
       return {
         ok: true,
         action: "report_week",
+        draftId: null,
         taskRef: null,
         energyValue: null,
-        confirmation:
-          "📈 The weekly report is being prepared.",
+        confirmation: "📈 The weekly report is being prepared.",
       };
     }
 
@@ -250,29 +185,40 @@ function parseCallbackData(data) {
       return {
         ok: true,
         action: "heatmap",
+        draftId: null,
         taskRef: null,
         energyValue: null,
-        confirmation:
-          "🟩 The energy heatmap is being updated.",
+        confirmation: "🟩 The energy heatmap is being updated.",
       };
     }
   }
 
-  return {
-    ok: false,
-    message: "Unknown action.",
-  };
+  if (["taskconfirm", "taskstart", "taskcancel"].includes(action)) {
+    const draftId = String(parts[1] || "").trim();
+
+    if (!draftId) {
+      return { ok: false, message: "Invalid draft reference." };
+    }
+
+    const confirmations = {
+      taskconfirm: "✅ Task added.",
+      taskstart: "▶️ Task added and started.",
+      taskcancel: "❌ Draft cancelled.",
+    };
+
+    return {
+      ok: true,
+      action: action === "taskconfirm" ? "confirm_task_draft" : action === "taskstart" ? "start_task_draft" : "cancel_task_draft",
+      draftId: draftId,
+      taskRef: null,
+      energyValue: null,
+      confirmation: confirmations[action],
+    };
+  }
+
+  return { ok: false, message: "Unknown action." };
 }
 
-/**
- * Converts old row-only callback data to task references.
- *
- * Old format:
- * done:12
- *
- * New format:
- * done:S12
- */
 function normalizeTaskRef(value) {
   const raw = String(value || "").trim();
 
@@ -283,52 +229,72 @@ function normalizeTaskRef(value) {
   return raw;
 }
 
-/**
- * Valid task references:
- *
- * S12                  Static schedule row
- * D20260702-12-R1      Dynamic scheduled task
- */
 function isValidTaskRef(taskRef) {
   return /^(S\d+|D[A-Za-z0-9-]+)$/.test(taskRef);
 }
 
-/**
- * Handles Telegram commands.
- */
-async function handleIncomingMessage(
-  message,
-  env,
-  ctx
-) {
+async function handleIncomingMessage(message, env, ctx) {
   const chatId = String(message.chat?.id || "");
-
-  const text = String(
-    message.text || ""
-  )
-    .trim()
-    .toLowerCase();
+  const rawText = String(message.text || "").trim();
+  const text = rawText.toLowerCase();
 
   if (chatId !== String(env.TELEGRAM_CHAT_ID)) {
     return;
   }
 
   if (text.startsWith("/start")) {
-    await sendTelegramMessage(
-      env,
-      chatId,
-      [
-        "Hello 👋",
-        "",
-        "PulseTask is online.",
-        "",
-        "/test — Send test buttons",
-        "/today — Generate today’s report",
-        "/week — Generate the weekly report",
-        "/heatmap — Update the energy heatmap",
-      ].join("\n")
-    );
+    await sendTelegramMessage(env, chatId, [
+      "Hello 👋",
+      "",
+      "PulseTask is online.",
+      "",
+      "/add START-FINISH | CATEGORY | TASK",
+      "/add DURATION | CATEGORY | TASK",
+      "/today — Generate today’s report",
+      "/week — Generate the weekly report",
+      "/heatmap — Update the energy heatmap",
+      "/test — Send test buttons",
+      "/help — Show examples",
+    ].join("\n"));
+    return;
+  }
 
+  if (text.startsWith("/help")) {
+    await sendTelegramMessage(env, chatId, [
+      "🧭 PulseTask help",
+      "",
+      "Examples:",
+      "/add 18:30-20:00 | PulseTask | Improve Telegram integration",
+      "/add 90m | Research | Read robotics paper",
+      "/add now-20:00 | Development | Update README",
+      "",
+      "For normal text, I will create a draft with a 60-minute default duration.",
+    ].join("\n"));
+    return;
+  }
+
+  if (text.startsWith("/add")) {
+    const result = await sendToAppsScript(env, {
+      action: "prepare_task_draft",
+      taskInput: rawText,
+      inputType: "slash_add",
+      telegramChatId: chatId,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (result?.preview && result?.draftId) {
+      await sendTelegramMessageWithKeyboard(env, chatId, result.preview, {
+        inline_keyboard: [
+          [
+            { text: "✅ Add", callback_data: `taskconfirm:${result.draftId}` },
+            { text: "▶️ Add & Start", callback_data: `taskstart:${result.draftId}` },
+          ],
+          [
+            { text: "❌ Cancel", callback_data: `taskcancel:${result.draftId}` },
+          ],
+        ],
+      });
+    }
     return;
   }
 
@@ -338,306 +304,166 @@ async function handleIncomingMessage(
   }
 
   if (text.startsWith("/today")) {
-    await sendTelegramMessage(
-      env,
-      chatId,
-      "📊 Today’s report is being prepared."
-    );
-
-    ctx.waitUntil(
-      sendToAppsScript(env, {
-        action: "report_today",
-        createdAt: new Date().toISOString(),
-      })
-    );
-
+    await sendTelegramMessage(env, chatId, "📊 Today’s report is being prepared.");
+    ctx.waitUntil(sendToAppsScript(env, { action: "report_today", createdAt: new Date().toISOString() }));
     return;
   }
 
   if (text.startsWith("/week")) {
-    await sendTelegramMessage(
-      env,
-      chatId,
-      "📈 The weekly report is being prepared."
-    );
-
-    ctx.waitUntil(
-      sendToAppsScript(env, {
-        action: "report_week",
-        createdAt: new Date().toISOString(),
-      })
-    );
-
+    await sendTelegramMessage(env, chatId, "📈 The weekly report is being prepared.");
+    ctx.waitUntil(sendToAppsScript(env, { action: "report_week", createdAt: new Date().toISOString() }));
     return;
   }
 
   if (text.startsWith("/heatmap")) {
-    await sendTelegramMessage(
-      env,
-      chatId,
-      "🟩 The energy heatmap is being updated."
-    );
+    await sendTelegramMessage(env, chatId, "🟩 The energy heatmap is being updated.");
+    ctx.waitUntil(sendToAppsScript(env, { action: "heatmap", createdAt: new Date().toISOString() }));
+    return;
+  }
 
-    ctx.waitUntil(
-      sendToAppsScript(env, {
-        action: "heatmap",
-        createdAt: new Date().toISOString(),
-      })
-    );
+  if (text.startsWith("/")) {
+    await sendTelegramMessage(env, chatId, [
+      "⚠️ Unknown command.",
+      "",
+      "Use /add to create a task, /today for a report, /week for the weekly report, or /help for examples.",
+    ].join("\n"));
+    return;
+  }
+
+  if (rawText) {
+    const result = await sendToAppsScript(env, {
+      action: "prepare_task_draft",
+      taskInput: rawText,
+      inputType: "text",
+      telegramChatId: chatId,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (result?.preview && result?.draftId) {
+      await sendTelegramMessageWithKeyboard(env, chatId, result.preview, {
+        inline_keyboard: [
+          [
+            { text: "✅ Add", callback_data: `taskconfirm:${result.draftId}` },
+            { text: "▶️ Add & Start", callback_data: `taskstart:${result.draftId}` },
+          ],
+          [
+            { text: "❌ Cancel", callback_data: `taskcancel:${result.draftId}` },
+          ],
+        ],
+      });
+    }
   }
 }
 
-/**
- * Sends a test task with all available buttons.
- */
 async function sendTestTask(env, chatId) {
-  // Change this row if row 12 has no task today.
   const TEST_ROW = 12;
-
   const taskRef = `S${TEST_ROW}`;
 
   const keyboard = {
     inline_keyboard: [
       [
-        {
-          text: "✅ Done",
-          callback_data: `done:${taskRef}`,
-        },
-        {
-          text: "⏭ Skip",
-          callback_data: `skip:${taskRef}`,
-        },
+        { text: "✅ Done", callback_data: `done:${taskRef}` },
+        { text: "⏭ Skip", callback_data: `skip:${taskRef}` },
       ],
       [
-        {
-          text: "⏱ Start",
-          callback_data: `start:${taskRef}`,
-        },
-        {
-          text: "⏸ Pause",
-          callback_data: `pause:${taskRef}`,
-        },
-        {
-          text: "🔁 Later",
-          callback_data: `later30:${taskRef}`,
-        },
+        { text: "⏱ Start", callback_data: `start:${taskRef}` },
+        { text: "⏸ Pause", callback_data: `pause:${taskRef}` },
+        { text: "🔁 Later", callback_data: `later30:${taskRef}` },
       ],
       [
-        {
-          text: "🔄 Reschedule to Free Time",
-          callback_data:
-            `reschedule:${taskRef}`,
-        },
+        { text: "🔄 Reschedule to Free Time", callback_data: `reschedule:${taskRef}` },
       ],
       [
-        {
-          text: "🔥1",
-          callback_data:
-            `energyval:${taskRef}:1`,
-        },
-        {
-          text: "🔥2",
-          callback_data:
-            `energyval:${taskRef}:2`,
-        },
-        {
-          text: "🔥3",
-          callback_data:
-            `energyval:${taskRef}:3`,
-        },
-        {
-          text: "🔥4",
-          callback_data:
-            `energyval:${taskRef}:4`,
-        },
-        {
-          text: "🔥5",
-          callback_data:
-            `energyval:${taskRef}:5`,
-        },
+        { text: "🔥1", callback_data: `energyval:${taskRef}:1` },
+        { text: "🔥2", callback_data: `energyval:${taskRef}:2` },
+        { text: "🔥3", callback_data: `energyval:${taskRef}:3` },
+        { text: "🔥4", callback_data: `energyval:${taskRef}:4` },
+        { text: "🔥5", callback_data: `energyval:${taskRef}:5` },
       ],
       [
-        {
-          text: "📊 Today",
-          callback_data: "report:today",
-        },
-        {
-          text: "📈 Week",
-          callback_data: "report:week",
-        },
-        {
-          text: "🟩 Heatmap",
-          callback_data: "report:heatmap",
-        },
+        { text: "📊 Today", callback_data: "report:today" },
+        { text: "📈 Week", callback_data: "report:week" },
+        { text: "🟩 Heatmap", callback_data: "report:heatmap" },
       ],
     ],
   };
 
-  await callTelegramApi(
-    env,
-    "sendMessage",
-    {
-      chat_id: chatId,
-      text: [
-        "🧪 PulseTask Smart Reschedule Test",
-        "",
-        `Test schedule row: ${TEST_ROW}`,
-        "Change TEST_ROW in src/index.js if this row is empty today.",
-      ].join("\n"),
-      reply_markup: keyboard,
-    }
-  );
+  await callTelegramApi(env, "sendMessage", {
+    chat_id: chatId,
+    text: [
+      "🧪 PulseTask Smart Reschedule Test",
+      "",
+      `Test schedule row: ${TEST_ROW}`,
+      "Change TEST_ROW in src/index.js if this row is empty today.",
+    ].join("\n"),
+    reply_markup: keyboard,
+  });
 }
 
-/**
- * Sends an authenticated request to Apps Script.
- */
-async function sendToAppsScript(
-  env,
-  actionData
-) {
+async function sendToAppsScript(env, actionData) {
   const controller = new AbortController();
-
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    25000
-  );
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
 
   try {
-    const response = await fetch(
-      env.APPS_SCRIPT_URL,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          secret: env.WORKER_API_SECRET,
-          ...actionData,
-        }),
-        signal: controller.signal,
-        redirect: "follow",
-      }
-    );
+    const response = await fetch(env.APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: env.WORKER_API_SECRET, ...actionData }),
+      signal: controller.signal,
+      redirect: "follow",
+    });
 
     const responseText = await response.text();
-
     let result;
 
     try {
       result = JSON.parse(responseText);
     } catch {
-      throw new Error(
-        `Apps Script returned non-JSON: ${
-          responseText.slice(0, 200)
-        }`
-      );
+      throw new Error(`Apps Script returned non-JSON: ${responseText.slice(0, 200)}`);
     }
 
     if (!response.ok || !result.ok) {
-      throw new Error(
-        result.error ||
-        `Apps Script HTTP error: ${
-          response.status
-        }`
-      );
+      throw new Error(result.error || `Apps Script HTTP error: ${response.status}`);
     }
 
-    console.log(
-      "Apps Script action completed:",
-      JSON.stringify(result)
-    );
-
+    console.log("Apps Script action completed:", JSON.stringify(result));
     return result;
-
   } catch (error) {
-    console.error(
-      "Apps Script background request failed:",
-      error
-    );
-
-    await sendTelegramMessage(
-      env,
-      env.TELEGRAM_CHAT_ID,
-      [
-        "⚠️ The Google Sheets operation failed.",
-        "",
-        error.message,
-      ].join("\n")
-    );
-
+    console.error("Apps Script background request failed:", error);
+    await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, ["⚠️ The Google Sheets operation failed.", "", error.message].join("\n"));
     throw error;
-
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-/**
- * Sends a Telegram callback popup.
- */
-async function answerCallbackQuery(
-  env,
-  callbackQueryId,
-  text
-) {
-  return callTelegramApi(
-    env,
-    "answerCallbackQuery",
-    {
-      callback_query_id: callbackQueryId,
-      text: text,
-      show_alert: false,
-    }
-  );
+async function answerCallbackQuery(env, callbackQueryId, text) {
+  return callTelegramApi(env, "answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text: text,
+    show_alert: false,
+  });
 }
 
-/**
- * Sends a plain Telegram message.
- */
-async function sendTelegramMessage(
-  env,
-  chatId,
-  text
-) {
-  return callTelegramApi(
-    env,
-    "sendMessage",
-    {
-      chat_id: chatId,
-      text: text,
-    }
-  );
+async function sendTelegramMessage(env, chatId, text) {
+  return callTelegramApi(env, "sendMessage", { chat_id: chatId, text: text });
 }
 
-/**
- * Calls Telegram Bot API.
- */
-async function callTelegramApi(
-  env,
-  method,
-  payload
-) {
-  const response = await fetch(
-    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    }
-  );
+async function sendTelegramMessageWithKeyboard(env, chatId, text, keyboard) {
+  return callTelegramApi(env, "sendMessage", { chat_id: chatId, text: text, reply_markup: keyboard });
+}
+
+async function callTelegramApi(env, method, payload) {
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 
   const result = await response.json();
 
   if (!response.ok || !result.ok) {
-    throw new Error(
-      `Telegram ${method} failed: ${
-        result.description ||
-        response.status
-      }`
-    );
+    throw new Error(`Telegram ${method} failed: ${result.description || response.status}`);
   }
 
   return result;

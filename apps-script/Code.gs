@@ -20,6 +20,12 @@ const CONFIG = {
   // Time configuration
   TIMEZONE: getScriptPropertyOrFallback_('TIMEZONE', 'Asia/Tehran'),
 
+  // Telegram draft and task configuration
+  DEFAULT_TASK_DURATION_MINUTES: 60,
+  DRAFT_EXPIRY_MINUTES: 15,
+  MAX_CATEGORY_LENGTH: 80,
+  MAX_TASK_LENGTH: 1000,
+
   // Reminder configuration
   REMINDER_MINUTES_BEFORE: 60,
   REMINDER_WINDOW_MINUTES: 5,
@@ -102,6 +108,22 @@ function doPost(e) {
     } else if (action === 'heatmap') {
       buildEnergyHeatmapSheet(7);
       sendTelegramMessage('🟩 The energy heatmap was updated successfully.');
+
+    } else if (action === 'prepare_task_draft') {
+      const result = createTaskDraft(payload);
+      return createJsonResponse(result);
+
+    } else if (action === 'confirm_task_draft') {
+      const result = confirmTaskDraft(payload.draftId, false, payload.telegramChatId || payload.chatId);
+      return createJsonResponse(result);
+
+    } else if (action === 'start_task_draft') {
+      const result = confirmTaskDraft(payload.draftId, true, payload.telegramChatId || payload.chatId);
+      return createJsonResponse(result);
+
+    } else if (action === 'cancel_task_draft') {
+      const result = cancelTaskDraft(payload.draftId, payload.telegramChatId || payload.chatId);
+      return createJsonResponse(result);
 
     } else {
       throw new Error(`Unknown action: ${action}`);
@@ -317,41 +339,124 @@ function saveReminderSentLog(taskRef, rowNumber, startTime, day, task, dateKey) 
 
 
 function markTaskAsDone(taskRef) {
-  const taskInfo = getTaskInfoByRef(taskRef);
-  if (!taskInfo.ok) throw new Error(taskInfo.message);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
 
-  if (!isAlreadyLoggedToday(taskRef, 'Done')) {
-    saveTaskAction(taskInfo, 'Done', 'cloudflare done button');
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) throw new Error(taskInfo.message);
+
+    if (isAlreadyLoggedToday(taskRef, 'Done')) {
+      return { ok: true, message: 'Already completed.' };
+    }
+
+    const state = getTrackedTaskState(taskInfo);
+    const sessionMinutes = taskInfo.isDynamic && state.status === 'Started' && state.startedAt
+      ? calculateSessionMinutesFromTimestamp(state.startedAt, new Date())
+      : 0;
+    const cumulativeActualMinutes = Number(state.actualMinutes || 0) + sessionMinutes;
+
+    updateTrackedTaskState(taskInfo, {
+      status: 'Done',
+      startedAt: '',
+      pausedAt: '',
+      completedAt: Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
+      actualMinutes: cumulativeActualMinutes
+    });
+
+    saveTaskAction(taskInfo, 'Done', 'cloudflare done button', true, sessionMinutes, cumulativeActualMinutes);
+    completeDynamicTaskIfNeeded(taskInfo, 'Completed');
+    setTaskCellStatusColor(taskInfo.originalRow, 'done');
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
   }
-
-  completeDynamicTaskIfNeeded(taskInfo);
-  setTaskCellStatusColor(taskInfo.originalRow, 'done');
 }
 
 function markTaskAsSkipped(taskRef) {
-  const taskInfo = getTaskInfoByRef(taskRef);
-  if (!taskInfo.ok) throw new Error(taskInfo.message);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
 
-  if (!isAlreadyLoggedToday(taskRef, 'Skipped')) {
-    saveTaskAction(taskInfo, 'Skipped', 'cloudflare skip button');
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) throw new Error(taskInfo.message);
+
+    if (!isAlreadyLoggedToday(taskRef, 'Skipped')) {
+      saveTaskAction(taskInfo, 'Skipped', 'cloudflare skip button', true, 0, Number(getTrackedTaskState(taskInfo).actualMinutes || 0));
+    }
+
+    completeDynamicTaskIfNeeded(taskInfo, 'Skipped');
+    setTaskCellStatusColor(taskInfo.originalRow, 'skipped');
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
   }
-
-  completeDynamicTaskIfNeeded(taskInfo, 'Skipped');
-  setTaskCellStatusColor(taskInfo.originalRow, 'skipped');
 }
 
 function markTaskAsStarted(taskRef) {
-  const taskInfo = getTaskInfoByRef(taskRef);
-  if (!taskInfo.ok) throw new Error(taskInfo.message);
-  saveTaskAction(taskInfo, 'Started', 'cloudflare start button');
-  setTaskCellStatusColor(taskInfo.originalRow, 'started');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) throw new Error(taskInfo.message);
+
+    const state = getTrackedTaskState(taskInfo);
+    if (taskInfo.isDynamic && (state.status === 'Started' || state.startedAt)) {
+      return { ok: true, message: 'Already started.' };
+    }
+
+    const nowText = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+    updateTrackedTaskState(taskInfo, {
+      status: 'Started',
+      startedAt: nowText,
+      pausedAt: '',
+      completedAt: '',
+      actualMinutes: Number(state.actualMinutes || 0)
+    });
+
+    saveTaskAction(taskInfo, 'Started', 'cloudflare start button', false, 0, Number(state.actualMinutes || 0));
+    setTaskCellStatusColor(taskInfo.originalRow, 'started');
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function markTaskAsPaused(taskRef) {
-  const taskInfo = getTaskInfoByRef(taskRef);
-  if (!taskInfo.ok) throw new Error(taskInfo.message);
-  saveTaskAction(taskInfo, 'Paused', 'cloudflare pause button');
-  setTaskCellStatusColor(taskInfo.originalRow, 'paused');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) throw new Error(taskInfo.message);
+
+    const state = getTrackedTaskState(taskInfo);
+    if (taskInfo.isDynamic && state.status !== 'Started') {
+      return { ok: true, message: 'No active session to pause.' };
+    }
+
+    const now = new Date();
+    const nowText = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+    const sessionMinutes = taskInfo.isDynamic && state.startedAt
+      ? calculateSessionMinutesFromTimestamp(state.startedAt, now)
+      : 0;
+    const cumulativeActualMinutes = Number(state.actualMinutes || 0) + sessionMinutes;
+
+    updateTrackedTaskState(taskInfo, {
+      status: 'Paused',
+      startedAt: '',
+      pausedAt: nowText,
+      completedAt: '',
+      actualMinutes: cumulativeActualMinutes
+    });
+
+    saveTaskAction(taskInfo, 'Paused', 'cloudflare pause button', true, sessionMinutes, cumulativeActualMinutes);
+    setTaskCellStatusColor(taskInfo.originalRow, 'paused');
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function markTaskAsLater(taskRef, minutes) {
@@ -502,7 +607,340 @@ function markTaskEnergy(taskRef, energyValue) {
   }, false);
 }
 
-function saveTaskAction(taskInfo, action, commandType) {
+function createTaskDraft(payload) {
+  const chatId = cleanCell(payload.telegramChatId || payload.chatId || '');
+  if (!chatId) {
+    throw new Error('Telegram chat ID is missing.');
+  }
+
+  const rawInput = cleanCell(payload.taskInput || '');
+  if (!rawInput) {
+    throw new Error('Task input is empty.');
+  }
+
+  const now = getNowInConfiguredTimezone();
+  const draft = parseTaskInputToDraft(rawInput, now, chatId);
+  draft.createdAt = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+  draft.telegramChatId = chatId;
+
+  const draftId = generateDraftId();
+  draft.draftId = draftId;
+
+  CacheService.getScriptCache().put(
+    draftId,
+    JSON.stringify(draft),
+    Math.max(1, Number(CONFIG.DRAFT_EXPIRY_MINUTES || 15) * 60)
+  );
+
+  return {
+    ok: true,
+    draftId: draftId,
+    preview: buildDraftPreview(draft)
+  };
+}
+
+function parseTaskInputToDraft(rawInput, now, chatId) {
+  const input = cleanCell(rawInput);
+
+  if (/^\/add/i.test(input)) {
+    const body = input.replace(/^\/add\s*/i, '').trim();
+    if (!body) {
+      throw new Error('Usage: /add START-FINISH | CATEGORY | TASK');
+    }
+
+    const parts = body.split('|').map(value => cleanCell(value));
+    if (parts.length !== 3) {
+      throw new Error('Usage: /add START-FINISH | CATEGORY | TASK');
+    }
+
+    const timeSpec = parts[0];
+    const category = parts[1] || 'Uncategorized';
+    const task = parts[2];
+
+    if (!task) {
+      throw new Error('Task description is required.');
+    }
+
+    if (category.length > CONFIG.MAX_CATEGORY_LENGTH) {
+      throw new Error('Category is too long.');
+    }
+
+    if (task.length > CONFIG.MAX_TASK_LENGTH) {
+      throw new Error('Task is too long.');
+    }
+
+    const window = parseTaskWindowSpec(timeSpec, now);
+    return {
+      date: formatDateKey(now),
+      start: window.start,
+      finish: window.finish,
+      category: category,
+      task: task,
+      source: 'Telegram',
+      telegramChatId: chatId
+    };
+  }
+
+  const category = detectCategory(rawInput);
+  const durationMinutes = CONFIG.DEFAULT_TASK_DURATION_MINUTES;
+  const startDate = new Date(now);
+  const finishDate = new Date(startDate.getTime() + durationMinutes * 60000);
+
+  if (rawInput.length > CONFIG.MAX_TASK_LENGTH) {
+    throw new Error('Task is too long.');
+  }
+
+  return {
+    date: formatDateKey(now),
+    start: formatTime(startDate),
+    finish: formatTime(finishDate),
+    category: category,
+    task: rawInput,
+    source: 'Telegram',
+    telegramChatId: chatId
+  };
+}
+
+function parseTaskWindowSpec(spec, now) {
+  const value = cleanCell(spec);
+  if (!value) {
+    throw new Error('Missing time value.');
+  }
+
+  const normalized = value.toLowerCase();
+  if (/^\d+(h|m)$/i.test(normalized) || /^\d+h\d+m$/i.test(normalized)) {
+    const minutes = parseDurationMinutes(value);
+    const startDate = new Date(now);
+    const finishDate = new Date(startDate.getTime() + minutes * 60000);
+    return {
+      start: formatTime(startDate),
+      finish: formatTime(finishDate)
+    };
+  }
+
+  if (value.includes('-')) {
+    const parts = value.split('-').map(part => cleanCell(part));
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      throw new Error('Usage: /add START-FINISH | CATEGORY | TASK');
+    }
+
+    const startDate = parseTimeToken(parts[0], now);
+    const finishDate = parseTimeToken(parts[1], now);
+
+    if (finishDate <= startDate) {
+      finishDate.setDate(finishDate.getDate() + 1);
+    }
+
+    return {
+      start: formatTime(startDate),
+      finish: formatTime(finishDate)
+    };
+  }
+
+  throw new Error('Usage: /add START-FINISH | CATEGORY | TASK or /add DURATION | CATEGORY | TASK');
+}
+
+function parseTimeToken(token, now) {
+  const value = cleanCell(token).toLowerCase();
+  if (value === 'now') {
+    return new Date(now);
+  }
+
+  const parts = value.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?$/i);
+  if (!parts) {
+    throw new Error(`Invalid time value: ${token}`);
+  }
+
+  const parsed = parseTimeString(value);
+  const result = new Date(now);
+  result.setHours(parsed.hours, parsed.minutes, 0, 0);
+  return result;
+}
+
+function parseDurationMinutes(value) {
+  const normalized = cleanCell(value).toLowerCase();
+  const hourMatch = normalized.match(/^(\d+)h(\d+)m$/i);
+  if (hourMatch) {
+    return Number(hourMatch[1]) * 60 + Number(hourMatch[2]);
+  }
+
+  const minuteMatch = normalized.match(/^(\d+)m$/i);
+  if (minuteMatch) {
+    return Number(minuteMatch[1]);
+  }
+
+  const hourOnlyMatch = normalized.match(/^(\d+)h$/i);
+  if (hourOnlyMatch) {
+    return Number(hourOnlyMatch[1]) * 60;
+  }
+
+  throw new Error(`Unsupported duration: ${value}`);
+}
+
+function detectCategory(text) {
+  const normalized = cleanCell(text).toLowerCase();
+  if (normalized.includes('pulse') || normalized.includes('telegram') || normalized.includes('readme')) {
+    return 'PulseTask';
+  }
+  if (normalized.includes('research') || normalized.includes('paper') || normalized.includes('robot')) {
+    return 'Research';
+  }
+  if (normalized.includes('gym') || normalized.includes('workout')) {
+    return 'Gym';
+  }
+  if (normalized.includes('dev') || normalized.includes('code') || normalized.includes('app') || normalized.includes('script')) {
+    return 'Development';
+  }
+  return 'Uncategorized';
+}
+
+function buildDraftPreview(draft) {
+  const dateLabel = draft.date || formatDateKey(new Date());
+  const category = draft.category || 'Uncategorized';
+  const task = draft.task || '';
+
+  return [
+    '📝 New Unplanned Task',
+    '',
+    `🗓 ${dateLabel}`,
+    `🕐 ${draft.start}–${draft.finish}`,
+    `▪️ Category: ${category}`,
+    '',
+    '🔹 Task:',
+    task
+  ].join('\n');
+}
+
+function generateDraftId() {
+  const stamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMddHHmmss');
+  const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `TG${stamp}${suffix}`;
+}
+
+function confirmTaskDraft(draftId, startImmediately, chatId) {
+  const cached = CacheService.getScriptCache().get(draftId);
+  if (!cached) {
+    return { ok: false, error: 'The draft expired or was not found.' };
+  }
+
+  const draft = JSON.parse(cached);
+  if (chatId && draft.telegramChatId && String(draft.telegramChatId) !== String(chatId)) {
+    return { ok: false, error: 'This draft belongs to a different chat.' };
+  }
+
+  const durationMinutes = calculateDurationMinutes(draft.start, draft.finish);
+  if (durationMinutes <= 0) {
+    return { ok: false, error: 'The task duration must be greater than zero.' };
+  }
+
+  const taskId = createTelegramDynamicTask(draft, startImmediately);
+  CacheService.getScriptCache().remove(draftId);
+
+  return {
+    ok: true,
+    draftId: draftId,
+    taskRef: taskId,
+    message: startImmediately ? '▶️ Task added and started.' : '✅ Task added.'
+  };
+}
+
+function cancelTaskDraft(draftId, chatId) {
+  const cached = CacheService.getScriptCache().get(draftId);
+  if (!cached) {
+    return { ok: false, error: 'The draft expired or was not found.' };
+  }
+
+  const draft = JSON.parse(cached);
+  if (chatId && draft.telegramChatId && String(draft.telegramChatId) !== String(chatId)) {
+    return { ok: false, error: 'This draft belongs to a different chat.' };
+  }
+
+  CacheService.getScriptCache().remove(draftId);
+  return { ok: true, message: 'Draft cancelled.' };
+}
+
+function createTelegramDynamicTask(draft, startImmediately) {
+  const now = getNowInConfiguredTimezone();
+  const dateKey = draft.date || formatDateKey(now);
+  const startTime = draft.start || formatTime(now);
+  const finishTime = draft.finish || formatTime(new Date(now.getTime() + CONFIG.DEFAULT_TASK_DURATION_MINUTES * 60000));
+  const durationMinutes = calculateDurationMinutes(startTime, finishTime);
+  const taskId = generateTelegramTaskId(dateKey, startTime);
+
+  const item = {
+    dynamicId: taskId,
+    createdAt: Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
+    originalDate: dateKey,
+    scheduleDate: dateKey,
+    originalRow: '',
+    originalStart: startTime,
+    originalFinish: finishTime,
+    previousTaskRef: '',
+    newStart: startTime,
+    newFinish: finishTime,
+    state: draft.category || 'Uncategorized',
+    status: 'Active',
+    task: draft.task || '',
+    reason: 'Telegram unplanned task',
+    rescheduleCount: 0,
+    taskType: 'Unplanned',
+    source: draft.source || 'Telegram',
+    startedAt: '',
+    pausedAt: '',
+    completedAt: '',
+    actualMinutes: 0,
+    plannedMinutes: durationMinutes
+  };
+
+  appendDynamicScheduleRow(item);
+
+  if (startImmediately) {
+    const taskInfo = {
+      taskRef: `D${taskId}`,
+      originalRow: '',
+      day: getWeekdayNameForDate(parseDateKey(dateKey)),
+      dateKey: dateKey,
+      start: startTime,
+      finish: finishTime,
+      state: item.state,
+      task: item.task,
+      isDynamic: true,
+      dynamicId: taskId,
+      dynamicSheetRow: getLastDynamicSheetRowById(taskId),
+      originalDate: dateKey,
+      taskType: item.taskType,
+      source: item.source,
+      plannedMinutes: durationMinutes,
+      actualMinutes: 0
+    };
+
+    markTaskAsStarted(taskInfo.taskRef);
+  }
+
+  return `D${taskId}`;
+}
+
+function generateTelegramTaskId(dateKey, startTime) {
+  const normalizedDate = String(dateKey || '').replace(/-/g, '');
+  const normalizedStart = String(startTime || '').replace(/:/g, '');
+  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `${normalizedDate}-${normalizedStart}-TG${suffix}`;
+}
+
+function getLastDynamicSheetRowById(dynamicId) {
+  const sheet = getDynamicScheduleSheet();
+  if (sheet.getLastRow() < 2) return null;
+
+  const rows = sheet.getDataRange().getDisplayValues();
+  for (let i = rows.length - 1; i >= 1; i--) {
+    if (cleanCell(rows[i][0]) === dynamicId) {
+      return i + 1;
+    }
+  }
+  return null;
+}
+
+function saveTaskAction(taskInfo, action, commandType, preventDuplicate, sessionMinutes, cumulativeActualMinutes) {
   saveActionLog({
     action: action,
     taskRef: taskInfo.taskRef,
@@ -512,8 +950,15 @@ function saveTaskAction(taskInfo, action, commandType) {
     finish: taskInfo.finish,
     state: taskInfo.state,
     task: taskInfo.task,
-    commandType: commandType
-  }, false);
+    commandType: commandType,
+    source: taskInfo.source || (taskInfo.isDynamic ? 'Telegram' : ''),
+    taskType: taskInfo.taskType || (taskInfo.isDynamic ? 'Rescheduled' : ''),
+    plannedMinutes: taskInfo.plannedMinutes || calculateDurationMinutes(taskInfo.start, taskInfo.finish),
+    actualMinutes: taskInfo.actualMinutes || 0,
+    status: action,
+    sessionMinutes: sessionMinutes || 0,
+    cumulativeActualMinutes: cumulativeActualMinutes || 0
+  }, preventDuplicate || false);
 }
 
 function getTaskInfoByRef(taskRef) {
@@ -630,7 +1075,13 @@ function saveActionLog(item, preventDuplicate) {
     item.task || '',
     item.energy || '',
     item.mood || '',
-    item.commandType || ''
+    item.commandType || '',
+    item.source || '',
+    item.taskType || '',
+    item.sessionMinutes || '',
+    item.cumulativeActualMinutes || '',
+    item.status || '',
+    item.plannedMinutes || ''
   ]);
 }
 
@@ -1155,7 +1606,14 @@ function getAllDynamicTasks() {
     status: row[11],
     task: row[12],
     reason: row[13],
-    rescheduleCount: Number(row[14] || 0)
+    rescheduleCount: Number(row[14] || 0),
+    taskType: row[15] || '',
+    source: row[16] || '',
+    startedAt: row[17] || '',
+    pausedAt: row[18] || '',
+    completedAt: row[19] || '',
+    actualMinutes: Number(row[20] || 0),
+    plannedMinutes: Number(row[21] || 0)
   }));
 }
 
@@ -1170,6 +1628,60 @@ function getActiveDynamicTasksForDate(dateKey) {
 function getDynamicTaskById(dynamicId) {
   const matches = getAllDynamicTasks().filter(item => item.dynamicId === dynamicId);
   return matches.length ? matches[matches.length - 1] : null;
+}
+
+function getTrackedTaskState(taskInfo) {
+  if (!taskInfo || !taskInfo.isDynamic || !taskInfo.dynamicId) {
+    return { status: '', startedAt: '', pausedAt: '', completedAt: '', actualMinutes: 0 };
+  }
+
+  const current = getDynamicTaskById(taskInfo.dynamicId);
+  return {
+    status: current ? current.status : '',
+    startedAt: current ? current.startedAt : '',
+    pausedAt: current ? current.pausedAt : '',
+    completedAt: current ? current.completedAt : '',
+    actualMinutes: current ? Number(current.actualMinutes || 0) : 0
+  };
+}
+
+function updateTrackedTaskState(taskInfo, changes) {
+  if (!taskInfo || !taskInfo.isDynamic || !taskInfo.dynamicId) {
+    return;
+  }
+
+  const sheet = getDynamicScheduleSheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(cleanCell);
+  const row = taskInfo.dynamicSheetRow || getLastDynamicSheetRowById(taskInfo.dynamicId);
+  if (!row) return;
+
+  const mapping = {
+    status: 'Status',
+    startedAt: 'Started At',
+    pausedAt: 'Paused At',
+    completedAt: 'Completed At',
+    actualMinutes: 'Actual Minutes',
+    plannedMinutes: 'Planned Minutes',
+    taskType: 'Task Type',
+    source: 'Source'
+  };
+
+  Object.keys(changes).forEach(key => {
+    const header = mapping[key];
+    if (!header) return;
+    const columnIndex = headers.indexOf(header);
+    if (columnIndex >= 0) {
+      sheet.getRange(row, columnIndex + 1).setValue(changes[key]);
+    }
+  });
+}
+
+function calculateSessionMinutesFromTimestamp(startedAt, finishedAt) {
+  if (!startedAt) return 0;
+  const start = new Date(startedAt);
+  const finish = finishedAt instanceof Date ? finishedAt : new Date(finishedAt);
+  if (isNaN(start.getTime()) || isNaN(finish.getTime())) return 0;
+  return Math.max(0, Math.round((finish.getTime() - start.getTime()) / 60000));
 }
 
 function setDynamicTaskStatus(sheetRow, status) {
@@ -1207,7 +1719,14 @@ function appendDynamicScheduleRow(item) {
     item.status,
     item.task,
     item.reason,
-    item.rescheduleCount
+    item.rescheduleCount,
+    item.taskType || '',
+    item.source || '',
+    item.startedAt || '',
+    item.pausedAt || '',
+    item.completedAt || '',
+    item.actualMinutes || 0,
+    item.plannedMinutes || ''
   ]);
 }
 
@@ -1217,6 +1736,11 @@ function setTaskCellStatusColor(rowNumber, status) {
     .getSheetByName(CONFIG.SHEET_NAME);
 
   if (!sheet) throw new Error(`Sheet not found: ${CONFIG.SHEET_NAME}`);
+
+  const numericRow = Number(rowNumber || 0);
+  if (!Number.isInteger(numericRow) || numericRow < 2) {
+    return;
+  }
 
   const headers = sheet
     .getRange(1, 1, 1, sheet.getLastColumn())
@@ -1240,7 +1764,7 @@ function setTaskCellStatusColor(rowNumber, status) {
   };
 
   sheet
-    .getRange(rowNumber, todayCol + 1)
+    .getRange(numericRow, todayCol + 1)
     .setBackground(colorMap[status] || CONFIG.DEFAULT_COLOR);
 }
 
@@ -1279,11 +1803,14 @@ function buildReportForDateRange(startDate, endDate) {
   let started = 0;
   let paused = 0;
   let later = 0;
-  let productiveMinutes = 0;
+  let actualMinutes = 0;
+  let plannedMinutes = 0;
+  let unplannedMinutes = 0;
 
   const stateMinutes = {};
   const energyValues = [];
   const hourlyEnergy = {};
+  const categoryTotals = {};
 
   actionRows.forEach(row => {
     if (!isDateInRange(row.actionDate, startDate, endDate)) return;
@@ -1295,11 +1822,18 @@ function buildReportForDateRange(startDate, endDate) {
     if (row.action === 'Done' && !uniqueDone[taskKey]) {
       uniqueDone[taskKey] = true;
 
-      const duration = calculateDurationMinutes(row.start, row.finish);
-      productiveMinutes += duration;
+      const duration = Number(row.cumulativeActualMinutes || row.sessionMinutes || 0);
+      const plannedDuration = Number(row.plannedMinutes || 0);
+      actualMinutes += duration;
+      plannedMinutes += plannedDuration;
 
       const stateName = row.state || 'Uncategorized';
       stateMinutes[stateName] = (stateMinutes[stateName] || 0) + duration;
+      categoryTotals[stateName] = (categoryTotals[stateName] || 0) + duration;
+
+      if (String(row.taskType || '').toLowerCase() === 'unplanned' || String(row.source || '').toLowerCase() === 'telegram') {
+        unplannedMinutes += duration;
+      }
     }
 
     if (row.action === 'Skipped') uniqueSkipped[taskKey] = true;
@@ -1345,7 +1879,9 @@ function buildReportForDateRange(startDate, endDate) {
     `🔁 Postponed: ${later}`,
     '',
     `🎯 Completion Rate: ${completionRate}%`,
-    `⏱ Productive Time: ${formatMinutes(productiveMinutes)}`,
+    `⏱ Actual Time: ${formatMinutes(actualMinutes)}`,
+    `🗓 Planned Time: ${formatMinutes(plannedMinutes)}`,
+    `🧩 Unplanned Time: ${formatMinutes(unplannedMinutes)}`,
     `🔥 Average Energy: ${averageEnergy}/5`
   ];
 
@@ -1365,6 +1901,11 @@ function buildReportForDateRange(startDate, endDate) {
     );
   }
 
+  const categorySummary = Object.keys(categoryTotals).map(name => `${name}: ${formatMinutes(categoryTotals[name])}`).join(', ');
+  if (categorySummary) {
+    lines.push('', '📂 Time by category:', categorySummary);
+  }
+
   return {
     startDate,
     endDate,
@@ -1375,10 +1916,14 @@ function buildReportForDateRange(startDate, endDate) {
     paused,
     later,
     completionRate,
-    productiveMinutes,
+    productiveMinutes: actualMinutes,
+    actualMinutes: actualMinutes,
+    plannedMinutes: plannedMinutes,
+    unplannedMinutes: unplannedMinutes,
     avgEnergy: averageEnergy,
     bestState,
     bestHour,
+    categoryTotals,
     message: lines.join('\n')
   };
 }
@@ -1392,6 +1937,8 @@ function saveWeeklyReport(report) {
     createWeeklyReportHeader(sheet);
   }
 
+  ensureWeeklyReportColumns(sheet);
+
   sheet.appendRow([
     Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
     report.startDate,
@@ -1404,6 +1951,9 @@ function saveWeeklyReport(report) {
     report.later,
     report.completionRate,
     report.productiveMinutes,
+    report.actualMinutes,
+    report.plannedMinutes,
+    report.unplannedMinutes,
     report.avgEnergy,
     report.bestState.name || '',
     report.bestState.minutes || '',
@@ -1493,7 +2043,13 @@ function getActionLogRows() {
     task: row[9],
     energy: row[10],
     mood: row[11],
-    commandType: row[12]
+    commandType: row[12],
+    source: row[13],
+    taskType: row[14],
+    sessionMinutes: row[15],
+    cumulativeActualMinutes: row[16],
+    status: row[17],
+    plannedMinutes: row[18]
   }));
 }
 
@@ -1653,7 +2209,9 @@ function createActionLogHeader(sheet) {
   sheet.clear();
   sheet.appendRow([
     'Action At', 'Action Date', 'Action', 'Task Ref', 'Day', 'Row Number',
-    'Start', 'Finish', 'State', 'Task', 'Energy', 'Mood', 'Command Type'
+    'Start', 'Finish', 'State', 'Task', 'Energy', 'Mood', 'Command Type',
+    'Source', 'Task Type', 'Session Minutes', 'Cumulative Actual Minutes',
+    'Status', 'Planned Minutes'
   ]);
   formatHeaderRow(sheet);
 }
@@ -1681,7 +2239,8 @@ function createDynamicScheduleHeader(sheet) {
     'Dynamic ID', 'Created At', 'Original Date', 'Schedule Date',
     'Original Row', 'Original Start', 'Original Finish', 'Previous Task Ref',
     'New Start', 'New Finish', 'State', 'Status', 'Task', 'Reason',
-    'Reschedule Count'
+    'Reschedule Count', 'Task Type', 'Source', 'Started At', 'Paused At',
+    'Completed At', 'Actual Minutes', 'Planned Minutes'
   ]);
   formatHeaderRow(sheet);
 }
@@ -1691,9 +2250,27 @@ function createWeeklyReportHeader(sheet) {
   sheet.appendRow([
     'Created At', 'Start Date', 'End Date', 'Pending', 'Done', 'Skipped',
     'Started', 'Paused', 'Later', 'Completion Rate', 'Productive Minutes',
-    'Average Energy', 'Best State', 'Best State Minutes', 'Best Hour',
-    'Best Hour Energy'
+    'Actual Minutes', 'Planned Minutes', 'Unplanned Minutes', 'Average Energy',
+    'Best State', 'Best State Minutes', 'Best Hour', 'Best Hour Energy'
   ]);
+  formatHeaderRow(sheet);
+}
+
+function ensureWeeklyReportColumns(sheet) {
+  const requiredHeaders = [
+    'Created At', 'Start Date', 'End Date', 'Pending', 'Done', 'Skipped',
+    'Started', 'Paused', 'Later', 'Completion Rate', 'Productive Minutes',
+    'Actual Minutes', 'Planned Minutes', 'Unplanned Minutes', 'Average Energy',
+    'Best State', 'Best State Minutes', 'Best Hour', 'Best Hour Energy'
+  ];
+
+  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(cleanCell);
+  const missing = requiredHeaders.filter(header => !currentHeaders.includes(header));
+
+  if (missing.length === 0) return;
+
+  const newHeaders = currentHeaders.concat(missing);
+  sheet.getRange(1, 1, 1, newHeaders.length).setValues([newHeaders]);
   formatHeaderRow(sheet);
 }
 
