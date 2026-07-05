@@ -323,11 +323,7 @@ async function handleIncomingMessage(message, env, ctx) {
     await callTelegramApi(env, "sendMessage", {
       chat_id: chatId,
       text: "📝 Send me the task description.",
-      reply_markup: {
-        force_reply: true,
-        input_field_placeholder: "Write your task...",
-        selective: true,
-      },
+      reply_markup: getMainMenuKeyboard("Write your task..."),
     });
     return;
   }
@@ -389,11 +385,12 @@ async function handleIncomingMessage(message, env, ctx) {
   }
 }
 
-function getMainMenuKeyboard() {
+function getMainMenuKeyboard(inputPlaceholder) {
   return {
     keyboard: [[{ text: "➕ Add Task" }]],
     resize_keyboard: true,
     is_persistent: true,
+    input_field_placeholder: inputPlaceholder || "Choose an action...",
   };
 }
 
