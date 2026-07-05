@@ -1,119 +1,122 @@
 # PulseTask
 
-PulseTask is a personal, serverless productivity assistant that connects Telegram, Google Apps Script, and Google Sheets.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![Google Apps Script](https://img.shields.io/badge/Google-Apps%20Script-4285F4?logo=google&logoColor=white)](https://developers.google.com/apps-script)
 
-It turns a weekly plan in Google Sheets into an interactive Telegram experience. The bot can remind you before tasks, track what you actually did, record energy levels, and generate daily or weekly reports.
+**A serverless personal productivity assistant powered by Telegram, Google Sheets, Google Apps Script, and Cloudflare Workers.**
 
-This version is intentionally designed for a single personal user:
+PulseTask turns a weekly Google Sheets schedule into an interactive Telegram workflow. It sends reminders, tracks task status and actual time, records energy levels, finds conflict-free time slots, and produces daily and weekly insights—without a VPS, paid database, or always-on computer.
 
-- no VPS
-- no paid database
-- no separate backend server
-- no multi-user setup
-- no always-on computer required
+> PulseTask is currently a single-user personal edition. Access is restricted to one configured Telegram chat ID.
 
-## Quick start
+## Highlights
 
-1. Create a Telegram bot with BotFather and copy the bot token.
-2. Create or open your Google Sheet and install the Apps Script code.
-3. Add the required secrets in:
-   - Apps Script Script Properties
-   - Cloudflare Worker secrets
-   - a local [.dev.vars](cloudflare-worker/.dev.vars) file for development only
-4. Deploy the Apps Script Web App and the Cloudflare Worker.
-5. Set the Telegram webhook to your Worker URL.
+- ⏰ Sends reminders approximately one hour before scheduled tasks
+- ➕ Provides a persistent **Add Task** button—no `/add` command required
+- 📝 Creates a preview before saving an unplanned Telegram task
+- ✅ Removes completed draft cards from the chat after **Add**, **Add & Start**, or **Cancel**
+- 🎯 Supports Done, Skip, Start, Pause, Later, and smart Reschedule actions
+- 🔄 Finds the nearest conflict-free slot across the next seven days
+- 🔥 Records energy from 1–5 and builds a seven-day hourly heatmap
+- 📊 Generates today and seven-day performance reports
+- ⏱ Tracks planned, session, actual, and unplanned time
+- 🧠 Identifies the most productive category and best energy period
+- 🎨 Colors schedule cells by task status
+- 🔐 Keeps credentials in Apps Script Properties and Cloudflare Secrets
 
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
-    U[Telegram User] --> T[Telegram Bot API]
-    T --> W[Cloudflare Worker]
-    W -->|Immediate button acknowledgement| T
-    W -->|Authenticated background request| A[Google Apps Script Web App]
-    A --> S[Google Sheets]
+    U[Telegram user] --> T[Telegram Bot API]
+    T -->|Webhook update| W[Cloudflare Worker]
+    W -->|Fast callback acknowledgement| T
+    W -->|Authenticated request| A[Google Apps Script Web App]
+    A <--> S[(Google Sheets)]
     A -->|Reminders and reports| T
 ```
 
-### Responsibilities
+| Component | Responsibility |
+|---|---|
+| Telegram | User interface, commands, inline actions, and persistent Add Task button |
+| Cloudflare Worker | Webhook handling, chat authorization, callback parsing, and fast acknowledgements |
+| Google Apps Script | Scheduling logic, task state, reports, triggers, and Telegram delivery |
+| Google Sheets | Weekly plan, dynamic schedule, logs, reports, and energy heatmap |
 
-- **Telegram Bot** provides the user interface.
-- **Cloudflare Worker** receives Telegram webhooks and responds to buttons immediately.
-- **Google Apps Script** handles schedule logic, rescheduling, reports, triggers, and Google Sheets operations.
-- **Google Sheets** stores the weekly plan and generated logs.
+The Telegram webhook points to Cloudflare—not directly to Apps Script. Worker-to-Apps-Script requests are authenticated with a shared `WORKER_API_SECRET`.
 
-## Main features
+## Telegram experience
 
-- Reminders about one hour before each task
-- Reminder checks every five minutes
-- Duplicate reminder prevention
-- Done, Skip, Start, Pause, and Later actions
-- Later 30m creates a real rescheduled task
-- Smart rescheduling to the nearest valid free slot
-- Dynamic tasks can be completed, postponed, or rescheduled again
-- Energy tracking from 1 to 5
-- Daily and seven-day reports
-- Productive-time and completion-rate calculations
-- Best work category and best energy hour
-- Seven-day hourly energy heatmap
-- Weekly Friday report
-- Automatic task-cell status colors
-- Secure Worker-to-Apps-Script shared secret
-- Safe initialization without deleting existing data
-- Lightweight internal tests
+Send `/start` once to install the persistent **➕ Add Task** button below the chat. Press it, type the task, review the generated draft, then choose:
 
-## Local development and secrets
+- **Add** — save the task
+- **Add & Start** — save it and start timing immediately
+- **Cancel** — discard the draft
 
-For local testing, keep secrets in [cloudflare-worker/.dev.vars](cloudflare-worker/.dev.vars). Use [cloudflare-worker/.dev.vars.example](cloudflare-worker/.dev.vars.example) as a template.
+After a successful action, the draft card is deleted to keep the chat clean. If saving fails, it stays visible so the action can be retried.
 
-## Telegram task creation
-
-You can create unplanned tasks directly from Telegram.
-
-Examples:
+Plain text also creates a task draft. Supported input formats include:
 
 ```text
-/add 18:30-20:00 | PulseTask | Improve Telegram integration
-/add 90m | Research | Read robotics paper
-/add now-20:00 | Development | Update README
+Review the PulseTask changes
+/add Review the PulseTask changes
+/add Development | Improve Telegram integration
+/add 18:30-20:00 | Research | Read a robotics paper
+/add 90m | Deep Work | Prepare the weekly report
+/add now-20:00 | Personal | Update my schedule
 ```
 
-Normal text also works. The bot will show a preview first and wait for your confirmation before saving the task.
+When no time is supplied, PulseTask suggests the nearest available 60-minute slot.
 
-Do not place real tokens or secrets in:
+### Commands
 
-- source code
-- README files
-- screenshots
-- Git history
+| Command | Result |
+|---|---|
+| `/start` | Opens PulseTask and installs the persistent Add Task button |
+| `/help` | Shows task-input examples |
+| `/add ...` | Creates an unplanned task draft |
+| `/today` | Generates today's report |
+| `/week` | Generates the last seven days report |
+| `/heatmap` | Rebuilds the energy heatmap |
+| `/test` | Sends a test task card for the configured test row |
 
-The repository is configured to ignore local secret files such as [.dev.vars](cloudflare-worker/.dev.vars) and [.env](.env).
-
-## Repository files
+Task reminder cards include:
 
 ```text
-pulse-task/
-├── README.md
-├── apps-script/
-│   └── Code.gs
-└── cloudflare-worker/
-    ├── package.json
-    ├── wrangler.jsonc
-    └── src/
-        └── index.js
+✅ Done        ⏭ Skip
+⏱ Start       ⏸ Pause       🔁 Later
+🔄 Reschedule to Free Time
+🔥1  🔥2  🔥3  🔥4  🔥5
+📊 Today       📈 Week       🟩 Heatmap
 ```
 
-The three essential source files in this release are:
+## Quick start
 
-```text
-Code.gs
-index.js
-README.md
+### Prerequisites
+
+- A Telegram account
+- A Google account and Google Sheet
+- A free Cloudflare account
+- Node.js 20 or newer
+- Git and npm
+
+### 1. Create the Telegram bot
+
+Open [@BotFather](https://t.me/BotFather), run `/newbot`, and save the generated bot token. Send `/start` to the new bot before continuing.
+
+Before setting a webhook, obtain your numeric chat ID:
+
+```powershell
+$BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/getUpdates"
 ```
 
-## Google Sheets schedule
+Read `message.chat.id` from the response.
 
-The first row of the main schedule sheet must contain these exact headers:
+### 2. Create the schedule sheet
+
+Create a Google Sheet. The first row of the main schedule tab must contain these exact headers:
 
 ```text
 Start | Finish | Time Duration | State | Saturday | Sunday | Monday | Tuesday | Wednesday | Thursday | Friday
@@ -123,403 +126,57 @@ Example:
 
 | Start | Finish | Time Duration | State | Monday | Tuesday |
 |---|---|---|---|---|---|
-| 06:30 | 08:30 | 02:00 | Health/GYM | Gym | Gym |
+| 06:30 | 08:00 | 01:30 | Health | Gym | Gym |
 | 09:00 | 11:00 | 02:00 | Deep Work | Product design | Research |
 | 13:00 | 14:00 | 01:00 | Learning | Read a paper | Online course |
 
-Ignored values:
+Use English weekday names. PulseTask accepts 24-hour and 12-hour times, including cross-midnight tasks such as `23:30` to `00:30`.
 
-```text
-blank
--
-—
-N/A
-NA
-null
-undefined
-```
+### 3. Install and configure Apps Script
 
-Supported time formats:
+In the Google Sheet, open **Extensions → Apps Script** and replace the editor contents with [`apps-script/Code.gs`](apps-script/Code.gs).
 
-```text
-06:30
-6:30
-17:30
-6:30 AM
-11:30 PM
-```
+In **Project Settings → Script Properties**, add:
 
-Tasks crossing midnight are supported:
-
-```text
-23:30 → 00:30
-```
-
-## Generated sheets
-
-PulseTask creates and manages:
-
-```text
-Action_Log
-Mood_Log
-Reminder_Log
-Dynamic_Schedule
-Weekly_Report
-Energy_Heatmap
-```
-
-### Action_Log
-
-Stores task interactions such as:
-
-```text
-Pending
-Done
-Skipped
-Started
-Paused
-Later 30m
-Rescheduled
-Energy 1/5 ... Energy 5/5
-```
-
-### Mood_Log
-
-Stores energy level, mood label, task, category, date, hour, and source.
-
-### Reminder_Log
-
-Prevents the same reminder from being sent repeatedly.
-
-### Dynamic_Schedule
-
-Stores tasks moved by Smart Reschedule or Later 30m without modifying the original weekly schedule.
-
-Important columns:
-
-```text
-Dynamic ID
-Original Date
-Schedule Date
-Original Row
-Original Start
-Original Finish
-Previous Task Ref
-New Start
-New Finish
-State
-Status
-Task
-Reason
-Reschedule Count
-```
-
-Possible statuses:
-
-```text
-Active
-Completed
-Skipped
-Superseded
-```
-
-Static task reference:
-
-```text
-S12
-```
-
-Dynamic task reference:
-
-```text
-D20260702-R12-V1
-```
-
-## Smart rescheduling
-
-Each reminder contains:
-
-```text
-🔄 Reschedule to Free Time
-```
-
-The rescheduling engine:
-
-1. Calculates the task duration.
-2. Reads static and active dynamic tasks.
-3. Excludes the task currently being moved.
-4. Adds a configurable buffer around busy intervals.
-5. checks gaps between tasks.
-6. Checks the free period after the final task of the day.
-7. Searches future days when today has no suitable slot.
-8. Creates a new row in `Dynamic_Schedule`.
-9. Marks the previous dynamic version as `Superseded` when necessary.
-10. Sends the new date and time to Telegram.
-
-Default configuration:
-
-```javascript
-RESCHEDULE_DAY_START: '06:00',
-RESCHEDULE_DAY_END: '23:00',
-RESCHEDULE_BUFFER_MINUTES: 5,
-RESCHEDULE_STEP_MINUTES: 5,
-RESCHEDULE_SEARCH_DAYS: 7
-```
-
-## Real Later 30m
-
-The Later button no longer records only a log entry.
-
-```text
-🔁 Later
-```
-
-It now:
-
-```text
-Current task
-→ Wait at least 30 minutes
-→ Find the nearest conflict-free slot
-→ Create a dynamic override
-→ Send the new time to Telegram
-→ Send a new reminder before the moved task
-```
-
-If the exact time 30 minutes later is occupied, PulseTask selects the next valid free slot.
-
-## Telegram buttons
-
-```text
-✅ Done
-⏭ Skip
-⏱ Start
-⏸ Pause
-🔁 Later
-🔄 Reschedule to Free Time
-🔥1 🔥2 🔥3 🔥4 🔥5
-📊 Today
-📈 Week
-🟩 Heatmap
-```
-
-Callback examples:
-
-```text
-done:S12
-skip:S12
-start:S12
-pause:S12
-later30:S12
-reschedule:S12
-energyval:S12:4
-report:today
-report:week
-report:heatmap
-```
-
-Old row-only callback values such as `done:12` are still accepted for backward compatibility.
-
-## Telegram commands
-
-```text
-/start
-/test
-/today
-/week
-/heatmap
-```
-
-| Command | Result |
+| Property | Value |
 |---|---|
-| `/start` | Shows bot help |
-| `/test` | Sends test buttons for the configured test row |
-| `/today` | Generates today's report |
-| `/week` | Generates the last seven days report |
-| `/heatmap` | Rebuilds the energy heatmap |
+| `TELEGRAM_BOT_TOKEN` | Token issued by BotFather |
+| `TELEGRAM_CHAT_ID` | Your numeric private chat ID |
+| `WORKER_API_SECRET` | A random secret of at least 32 characters |
+| `MAIN_SHEET_NAME` | Main schedule tab name, for example `Sheet1` |
+| `TIMEZONE` | IANA timezone, for example `Asia/Tehran` |
 
-The test row is configured in `index.js`:
-
-```javascript
-const TEST_ROW = 12;
-```
-
-## 1. Create the Telegram bot
-
-Open the official `@BotFather` account and send:
-
-```text
-/newbot
-```
-
-Choose a display name and a username ending in `bot`.
-
-BotFather returns the Telegram bot token.
-
-Never commit the real token to GitHub.
-
-Open the new bot and send:
-
-```text
-/start
-```
-
-Recommended BotFather commands:
-
-```text
-start - Show bot help
-test - Send test buttons
-today - Generate today's report
-week - Generate the weekly report
-heatmap - Update the energy heatmap
-```
-
-## 2. Get the Telegram chat ID
-
-Send `/start` to the bot, then run:
-
-```powershell
-$BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-
-Invoke-RestMethod `
-  -Uri "https://api.telegram.org/bot$BOT_TOKEN/getUpdates"
-```
-
-Find:
-
-```text
-message → chat → id
-```
-
-## 3. Configure Apps Script Properties
-
-Open:
-
-```text
-Google Sheet
-→ Extensions
-→ Apps Script
-→ Project Settings
-→ Script Properties
-```
-
-Create:
-
-| Property | Example |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | BotFather token |
-| `TELEGRAM_CHAT_ID` | Personal numeric chat ID |
-| `WORKER_API_SECRET` | Long random private value |
-| `MAIN_SHEET_NAME` | `Time/Plan` or your sheet name |
-| `TIMEZONE` | `Asia/Tehran` |
-
-The value of `WORKER_API_SECRET` must exactly match the Cloudflare secret with the same name.
-
-## 4. Install Apps Script code
-
-Open:
-
-```text
-Extensions → Apps Script
-```
-
-Replace the existing code with `Code.gs`.
-
-Set the Apps Script project timezone to match the `TIMEZONE` Script Property.
-
-## 5. Initialize PulseTask
-
-Run:
+Set the Apps Script project timezone to the same timezone. Then run:
 
 ```javascript
-initializePulseTask
+initializePulseTask()
 ```
 
-This function:
+Approve the requested Google permissions. Initialization validates the setup, creates only missing generated sheets, installs triggers, builds the heatmap, and preserves existing data.
 
-- Validates Script Properties
-- Validates the main sheet and headers
-- Creates only missing generated sheets
-- Preserves existing logs and data
-- Installs the required triggers
-- Builds the initial heatmap
-- Sends a successful initialization message
+### 4. Deploy Apps Script
 
-It is safe to run again.
-
-For a complete reset of generated sheets and colors, run:
-
-```javascript
-fullResetSystem
-```
-
-This does not delete the main weekly schedule.
-
-## 6. Run internal tests
-
-Run:
-
-```javascript
-runPulseTaskTests
-```
-
-Tests include:
-
-- 24-hour time parsing
-- 12-hour time parsing
-- Normal duration
-- Cross-midnight duration
-- Static and dynamic task references
-- Free-slot detection
-
-These tests do not modify schedule data.
-
-## 7. Deploy Apps Script
-
-Open:
-
-```text
-Deploy
-→ New deployment
-→ Web app
-```
-
-Use:
+Select **Deploy → New deployment → Web app**:
 
 ```text
 Execute as: Me
 Who has access: Anyone
 ```
 
-Copy the URL ending in `/exec`.
+Copy the deployment URL ending in `/exec`. This becomes `APPS_SCRIPT_URL` in Cloudflare.
 
-This is the Cloudflare secret:
+> After changing `Code.gs`, publish a new Web App version from **Deploy → Manage deployments → Edit → New version → Deploy**.
 
-```text
-APPS_SCRIPT_URL
+### 5. Configure and deploy the Worker
+
+```powershell
+git clone https://github.com/Pouya-Mansournia/PulseTask.git
+cd PulseTask/cloudflare-worker
+npm install
+npx wrangler login
 ```
 
-After changing `Code.gs`:
-
-```text
-Deploy
-→ Manage deployments
-→ Edit
-→ New version
-→ Deploy
-```
-
-## 8. Configure Cloudflare Worker
-
-The Worker needs:
-
-```text
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-APPS_SCRIPT_URL
-WORKER_API_SECRET
-```
-
-Set them:
+Store the production secrets:
 
 ```powershell
 npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -528,68 +185,28 @@ npx wrangler secret put APPS_SCRIPT_URL
 npx wrangler secret put WORKER_API_SECRET
 ```
 
-The Worker validates that all required environment variables exist and returns a clear configuration error if one is missing.
-
-## 9. Worker configuration
-
-Example `wrangler.jsonc`:
-
-```json
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "pulse-task-worker",
-  "main": "src/index.js",
-  "compatibility_date": "2026-07-02",
-  "workers_dev": true
-}
-```
-
-Example `package.json`:
-
-```json
-{
-  "name": "pulse-task-worker",
-  "version": "2.3.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
-  },
-  "devDependencies": {
-    "wrangler": "^4.106.0"
-  }
-}
-```
-
-Expected structure:
-
-```text
-cloudflare-worker/
-├── package.json
-├── wrangler.jsonc
-└── src/
-    └── index.js
-```
-
-## 10. Deploy Worker
+`WORKER_API_SECRET` must exactly match the Apps Script Property. Deploy:
 
 ```powershell
-npm install
-npx wrangler login
-npx wrangler deploy
+npm run build
+npm run deploy
 ```
 
-Opening the Worker URL in a browser should return a JSON health response.
+Opening the resulting `workers.dev` URL should return a health response similar to:
 
-## 11. Set Telegram webhook
+```json
+{
+  "ok": true,
+  "service": "PulseTask Telegram Worker",
+  "version": "2.1-telegram-drafts"
+}
+```
 
-The Telegram webhook must point only to the Cloudflare Worker.
+### 6. Set the Telegram webhook
 
 ```powershell
 $BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-$WORKER_URL = "https://pulse-task-worker.YOUR-SUBDOMAIN.workers.dev"
+$WORKER_URL = "https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev"
 
 Invoke-RestMethod `
   -Uri "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" `
@@ -601,182 +218,196 @@ Invoke-RestMethod `
   } | ConvertTo-Json)
 ```
 
-Verify:
+Verify the webhook:
 
 ```powershell
-Invoke-RestMethod `
-  -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
+Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
 ```
 
-## Triggers
+Finally, send `/start` to the bot. The persistent **➕ Add Task** button should appear below the message field.
 
-`initializePulseTask` installs:
+## Local development
 
-```text
-checkUpcomingTaskReminders
-→ Every 5 minutes
+Copy the example environment file:
 
-sendWeeklyWellbeingReport
-→ Friday around 23:45
+```powershell
+cd cloudflare-worker
+Copy-Item .dev.vars.example .dev.vars
 ```
 
-The installation function deletes old project triggers first, preventing duplicate trigger execution.
+Fill `.dev.vars` with development credentials, then run:
 
-## Reminder timing
-
-Default reminder settings:
-
-```text
-60 minutes before the task
-±5-minute reminder window
-Trigger every 5 minutes
+```powershell
+npm run dev
 ```
 
-For a task starting at `09:00`, the reminder normally arrives around `08:00`.
+Useful scripts:
 
-## Testing workflow
-
-Recommended order:
-
-```text
-1. Run initializePulseTask
-2. Run runPulseTaskTests
-3. Run testTelegram
-4. Run testNextUpcomingReminder
-5. Send /start
-6. Send /test
-7. Test Later
-8. Test Smart Reschedule
-9. Send /today
-10. Send /week
-```
-
-## Task colors
-
-| Status | Color |
+| Command | Purpose |
 |---|---|
-| Pending | Light red |
-| Done | Light green |
-| Skipped | Light orange |
-| Started | Light blue |
-| Paused / moved | Light purple |
-| Default | White |
+| `npm run dev` | Start the local Wrangler development server |
+| `npm run build` | Validate and bundle the Worker without deploying |
+| `npm run deploy` | Deploy the Worker to Cloudflare |
+| `npm run tail` | Stream production Worker logs |
+
+Never commit `.dev.vars`; it is intentionally ignored by Git.
+
+## Google Sheets data model
+
+PulseTask creates and maintains these tabs:
+
+| Sheet | Purpose |
+|---|---|
+| `Action_Log` | Task actions, timing, source, status, and completion data |
+| `Mood_Log` | Energy ratings, mood labels, task context, date, and hour |
+| `Reminder_Log` | Deduplication records for sent reminders |
+| `Dynamic_Schedule` | Rescheduled and Telegram-created tasks |
+| `Weekly_Report` | Aggregate performance and per-category metrics |
+| `Energy_Heatmap` | Seven-day hourly average energy grid |
+
+Static tasks use references such as `S12`. Dynamic tasks use references such as `D20260702-R12-V1` or Telegram-generated IDs.
+
+### Dynamic task lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active
+    Active --> Completed: Done
+    Active --> Skipped: Skip
+    Active --> Superseded: Later or Reschedule again
+    Superseded --> Active: New dynamic version
+```
+
+The original weekly plan remains intact. Moves and unplanned tasks are stored as dynamic rows instead of overwriting the schedule.
+
+## Smart scheduling
+
+The rescheduling engine:
+
+1. Calculates the task duration.
+2. Combines recurring schedule rows with active dynamic tasks.
+3. Excludes the task currently being moved.
+4. Adds a buffer around busy intervals.
+5. Searches gaps in configurable increments.
+6. Checks free time after the final task of each day.
+7. Continues across future days when necessary.
+8. Creates a new active dynamic task and supersedes its previous version.
+
+Defaults in [`apps-script/Code.gs`](apps-script/Code.gs):
+
+```javascript
+RESCHEDULE_DAY_START: '06:00',
+RESCHEDULE_DAY_END: '23:00',
+RESCHEDULE_BUFFER_MINUTES: 5,
+RESCHEDULE_STEP_MINUTES: 5,
+RESCHEDULE_SEARCH_DAYS: 7
+```
+
+**Later** requests a slot at least 30 minutes in the future. If that time is occupied, PulseTask selects the next valid slot.
+
+## Automation and testing
+
+`initializePulseTask()` installs:
+
+- `checkUpcomingTaskReminders` every five minutes
+- `sendWeeklyWellbeingReport` every Friday around 23:45
+
+Run the non-destructive internal checks from Apps Script:
+
+```javascript
+runPulseTaskTests()
+```
+
+They cover time parsing, normal and cross-midnight durations, task references, and free-slot detection.
+
+Recommended end-to-end checks:
+
+1. Run `initializePulseTask()`.
+2. Run `runPulseTaskTests()` and `testTelegram()`.
+3. Deploy both Apps Script and the Worker.
+4. Send `/start`, press **Add Task**, and confirm a draft.
+5. Run `testNextUpcomingReminder()` or send `/test`.
+6. Verify actions in `Action_Log` and energy in `Mood_Log`.
+7. Send `/today`, `/week`, and `/heatmap`.
 
 ## Security
 
-Real credentials must exist only in:
+- Never place tokens, chat IDs, deployment URLs, or shared secrets in source files.
+- Keep Apps Script credentials in **Script Properties**.
+- Keep production Worker credentials in **Wrangler Secrets**.
+- Keep local credentials only in ignored files such as `.dev.vars`.
+- Use a unique random `WORKER_API_SECRET` of at least 32 characters.
+- Rotate the Telegram token immediately through BotFather if it is exposed.
+- Remember that deleting a leaked secret from the latest commit does not remove it from Git history.
 
-### Apps Script Properties
+The Apps Script Web App is publicly reachable so Cloudflare can call it; every POST is rejected unless it contains the correct shared secret. The Worker also ignores Telegram messages from chat IDs other than the configured owner.
 
-```text
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-WORKER_API_SECRET
-MAIN_SHEET_NAME
-TIMEZONE
-```
-
-### Cloudflare Secrets
-
-```text
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-APPS_SCRIPT_URL
-WORKER_API_SECRET
-```
-
-Never commit credentials into:
-
-```text
-Code.gs
-index.js
-README.md
-wrangler.jsonc
-Git history
-screenshots
-```
-
-Keep secrets only in Apps Script Script Properties, Cloudflare Worker secrets, or local ignored files such as `.dev.vars` and `.env`.
-
-The Worker also rejects Telegram updates from chat IDs other than the configured personal chat ID.
+See [`SECURITY.md`](SECURITY.md) and [`docs/SECURITY_GUIDE.md`](docs/SECURITY_GUIDE.md) for reporting and recovery guidance.
 
 ## Troubleshooting
 
-### Worker live logs
+### The Add Task button is missing
 
-```powershell
-npx wrangler tail
-```
+Send `/start` once after deploying the Worker. Telegram then installs the persistent reply keyboard.
 
-### Apps Script returns HTML
+### Apps Script returns HTML instead of JSON
 
-Use the deployed `/exec` URL, not `/dev`.
+Use the deployed `/exec` URL—not `/dev`—and confirm Web App access is set to **Anyone**.
 
-Deployment access must be:
+### Apps Script changes are not visible
 
-```text
-Execute as: Me
-Who has access: Anyone
-```
+Publishing code in the editor is not enough. Create a new Web App version from **Manage deployments**.
 
 ### No reminder arrives
 
-Check:
+Check the Apps Script trigger, project timezone, weekday header, task time, and `Reminder_Log`. A reminder is normally sent 60 minutes before the task within a ±5-minute window.
 
-- `checkUpcomingTaskReminders` trigger exists
-- Project timezone matches the schedule
-- Task time format is valid
-- Today column name is correct
-- Reminder was not already written to `Reminder_Log`
-- Task starts within the reminder window
+### A task is not scheduled exactly 30 minutes later
 
-### Reschedule finds no free time
+That slot conflicts with another task or its buffer. PulseTask chooses the first valid slot at or after the requested delay.
 
-Check:
-
-- `RESCHEDULE_DAY_END`
-- `RESCHEDULE_SEARCH_DAYS`
-- Task duration
-- Busy intervals
-- Five-minute buffer
-- Active rows in `Dynamic_Schedule`
-
-### Later does not use exactly 30 minutes later
-
-This is expected when that time conflicts with another task. PulseTask searches for the first valid slot at or after the requested delay.
-
-### Changes to Apps Script are not visible
-
-Deploy a new Web App version:
-
-```text
-Deploy → Manage deployments → Edit → New version → Deploy
-```
-
-### Changes to Worker are not visible
-
-Run:
+### Inspect live Worker errors
 
 ```powershell
-npx wrangler deploy
+cd cloudflare-worker
+npm run tail
 ```
 
-## Personal Edition scope
-
-PulseTask Personal Edition deliberately does not include:
+## Repository structure
 
 ```text
-Multi-user accounts
-Public registration
-Paid database
-VPS
-Subscription system
-Separate authentication service
-Complex SaaS infrastructure
+PulseTask/
+├── apps-script/
+│   ├── Code.gs
+│   └── appsscript.json
+├── cloudflare-worker/
+│   ├── src/index.js
+│   ├── .dev.vars.example
+│   ├── package.json
+│   └── wrangler.jsonc
+├── docs/
+├── examples/
+├── CONTRIBUTING.md
+├── SECURITY.md
+└── README.md
 ```
 
-The goal is a fast, reliable, free, personal system using the existing serverless architecture.
+Additional references:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/GOOGLE_SHEETS_SCHEMA.md`](docs/GOOGLE_SHEETS_SCHEMA.md)
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+- [`docs/ROADMAP.md`](docs/ROADMAP.md)
+
+## Scope and roadmap
+
+The personal edition deliberately avoids multi-user accounts, public registration, subscriptions, a paid database, and separate authentication infrastructure. Future directions include persistent event storage, multi-user onboarding, per-user Google Sheet connections, and a web dashboard.
+
+## Contributing
+
+Issues and focused pull requests are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before contributing and never include real credentials or personal schedule data in examples, logs, screenshots, or test fixtures.
 
 ## License
 
-MIT
+PulseTask is available under the [MIT License](LICENSE).
