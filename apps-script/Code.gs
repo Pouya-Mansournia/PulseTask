@@ -26,9 +26,9 @@ const CONFIG = {
   MAX_CATEGORY_LENGTH: 80,
   MAX_TASK_LENGTH: 1000,
 
-  // Telegram inbox on the main Time/Plan sheet (starts at N2)
-  TELEGRAM_QUEUE_START_ROW: 2,
-  TELEGRAM_QUEUE_START_COLUMN: 14,
+  // Telegram inbox on the main Time/Plan sheet (starts at L1)
+  TELEGRAM_QUEUE_START_ROW: 1,
+  TELEGRAM_QUEUE_START_COLUMN: 12,
 
   // Reminder configuration
   REMINDER_MINUTES_BEFORE: 60,
@@ -1018,7 +1018,7 @@ function createTelegramDynamicTask(draft, startImmediately) {
 }
 
 /**
- * Creates the Telegram task inbox at N2 on the main schedule sheet.
+ * Creates the Telegram task inbox at L1 on the main schedule sheet.
  * Existing queue rows are preserved. Conflicting values are never overwritten.
  */
 function ensureTelegramQueueSection_() {
@@ -1050,14 +1050,14 @@ function ensureTelegramQueueSection_() {
   const titleCell = sheet.getRange(startRow, startColumn);
   const currentTitle = cleanCell(titleCell.getDisplayValue());
   if (currentTitle && currentTitle !== 'Queue') {
-    throw new Error('Cannot create Queue: cell N2 already contains other data.');
+    throw new Error('Cannot create Queue: cell L1 already contains other data.');
   }
 
   const headerRange = sheet.getRange(startRow + 1, startColumn, 1, headers.length);
   const currentHeaders = headerRange.getDisplayValues()[0].map(cleanCell);
   const conflictingHeader = currentHeaders.find((value, index) => value && value !== headers[index]);
   if (conflictingHeader) {
-    throw new Error('Cannot create Queue: cells N3:S3 already contain other data.');
+    throw new Error('Cannot create Queue: cells L2:Q2 already contain other data.');
   }
 
   titleCell

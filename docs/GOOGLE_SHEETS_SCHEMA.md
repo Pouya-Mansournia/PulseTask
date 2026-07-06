@@ -22,7 +22,7 @@ Friday
 
 ### Telegram Queue
 
-The main schedule sheet also contains a lightweight inbox beginning at `N2`.
+The main schedule sheet also contains a lightweight inbox beginning at `L1`.
 Confirmed tasks added without immediately starting them are appended to it;
 cancelled drafts and **Add & Start** tasks are not.
 The normal `Dynamic_Schedule` record is still created, so existing scheduling,
@@ -30,12 +30,12 @@ tracking, and **Add & Start** behavior remain unchanged.
 
 | Column | Header | Meaning |
 |---|---|---|
-| N | Added At | Telegram confirmation timestamp |
-| O | Category | Detected or supplied category |
-| P | Task | Task description |
-| Q | Duration | Planned duration |
-| R | Suggested Slot | Slot selected by the existing scheduler |
-| S | Task Ref | Reference used to prevent duplicate Queue rows |
+| L | Added At | Telegram confirmation timestamp |
+| M | Category | Detected or supplied category |
+| N | Task | Task description |
+| O | Duration | Planned duration |
+| P | Suggested Slot | Slot selected by the existing scheduler |
+| Q | Task Ref | Reference used to prevent duplicate Queue rows |
 
 Use the persistent **📥 Queue** Telegram button (or `/queue`) to list pending
 items. Selecting one starts its timer and clears it from the visible Queue.

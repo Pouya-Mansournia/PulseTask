@@ -16,7 +16,7 @@ PulseTask turns a weekly Google Sheets schedule into an interactive Telegram wor
 - ➕ Provides a persistent **Add Task** button—no `/add` command required
 - 📝 Creates a preview before saving an unplanned Telegram task
 - ✅ Removes completed draft cards from the chat after **Add**, **Add & Start**, or **Cancel**
-- 📥 Keeps unstarted Telegram tasks in a **Queue** at `N2` and lets you pick one to start from Telegram
+- 📥 Keeps unstarted Telegram tasks in a **Queue** at `L1` and lets you pick one to start from Telegram
 - 🎯 Supports Done, Skip, Start, Pause, Later, and smart Reschedule actions
 - 🔄 Finds the nearest conflict-free slot across the next seven days
 - 🔥 Records energy from 1–5 and builds a seven-day hourly heatmap
@@ -271,7 +271,7 @@ PulseTask creates and maintains these tabs:
 
 Static tasks use references such as `S12`. Dynamic tasks use references such as `D20260702-R12-V1` or Telegram-generated IDs.
 
-The main schedule sheet also exposes the Telegram Queue at `N2:S`. See [`docs/GOOGLE_SHEETS_SCHEMA.md`](docs/GOOGLE_SHEETS_SCHEMA.md) for its columns and lifecycle.
+The main schedule sheet also exposes the Telegram Queue at `L1:Q`. See [`docs/GOOGLE_SHEETS_SCHEMA.md`](docs/GOOGLE_SHEETS_SCHEMA.md) for its columns and lifecycle.
 
 ### Dynamic task lifecycle
 
