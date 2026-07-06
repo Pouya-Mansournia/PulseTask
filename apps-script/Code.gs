@@ -984,7 +984,7 @@ function createTelegramDynamicTask(draft, startImmediately) {
     newStart: startTime,
     newFinish: finishTime,
     state: draft.category || 'Uncategorized',
-    status: 'Active',
+    status: startImmediately ? 'Active' : 'Queued',
     task: draft.task || '',
     reason: 'Telegram unplanned task',
     rescheduleCount: 0,
@@ -1141,7 +1141,7 @@ function appendTelegramQueueItem_(item, taskRef) {
     .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
 }
 
-/** Returns active Queue tasks for Telegram, newest additions first. */
+/** Returns queued tasks for Telegram, newest additions first. */
 function getTelegramQueueItems_() {
   const sheet = ensureTelegramQueueSection_();
   const firstDataRow = CONFIG.TELEGRAM_QUEUE_START_ROW + 2;
@@ -1152,9 +1152,9 @@ function getTelegramQueueItems_() {
     return { ok: true, items: [], total: 0 };
   }
 
-  const activeDynamicIds = {};
+  const queueDynamicIds = {};
   getAllDynamicTasks().forEach(item => {
-    activeDynamicIds[`D${item.dynamicId}`] = item.status === 'Active';
+    queueDynamicIds[`D${item.dynamicId}`] = ['Queued', 'Active'].includes(item.status);
   });
 
   const items = sheet
@@ -1169,7 +1169,7 @@ function getTelegramQueueItems_() {
       suggestedSlot: cleanCell(row[4]),
       taskRef: cleanCell(row[5])
     }))
-    .filter(item => item.task && /^(D[A-Za-z0-9-]+)$/.test(item.taskRef) && activeDynamicIds[item.taskRef])
+    .filter(item => item.task && /^(D[A-Za-z0-9-]+)$/.test(item.taskRef) && queueDynamicIds[item.taskRef])
     .reverse();
 
   return {
@@ -1561,7 +1561,7 @@ function getTaskInfoByRef(taskRef) {
     const dynamicId = taskRef.substring(1);
     const item = getDynamicTaskById(dynamicId);
 
-    if (!item || !isOpenDynamicTaskStatus_(item.status)) {
+    if (!item || !isActionableDynamicTaskStatus_(item.status)) {
       return { ok: false, message: `Open dynamic task not found: ${dynamicId}` };
     }
 
@@ -2211,11 +2211,42 @@ function getAllDynamicTasks() {
 }
 
 function getAllActiveDynamicTasks() {
-  return getAllDynamicTasks().filter(item => isOpenDynamicTaskStatus_(item.status));
+  const queuedRefs = getTelegramQueueTaskRefMap_();
+  return getAllDynamicTasks().filter(item =>
+    isScheduledDynamicTaskStatus_(item.status) &&
+    !queuedRefs[`D${item.dynamicId}`]
+  );
 }
 
-function isOpenDynamicTaskStatus_(status) {
+function isScheduledDynamicTaskStatus_(status) {
   return ['Active', 'Started', 'Paused'].includes(cleanCell(status));
+}
+
+function isActionableDynamicTaskStatus_(status) {
+  return ['Queued', 'Active', 'Started', 'Paused'].includes(cleanCell(status));
+}
+
+/** Visible Queue rows are never treated as busy schedule intervals. */
+function getTelegramQueueTaskRefMap_() {
+  const sheet = ensureTelegramQueueSection_();
+  const firstDataRow = CONFIG.TELEGRAM_QUEUE_START_ROW + 2;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < firstDataRow) return {};
+
+  const refs = sheet
+    .getRange(
+      firstDataRow,
+      CONFIG.TELEGRAM_QUEUE_START_COLUMN + 5,
+      lastRow - firstDataRow + 1,
+      1
+    )
+    .getDisplayValues();
+
+  return refs.reduce((result, row) => {
+    const taskRef = cleanCell(row[0]);
+    if (/^D[A-Za-z0-9-]+$/.test(taskRef)) result[taskRef] = true;
+    return result;
+  }, {});
 }
 
 function getActiveDynamicTasksForDate(dateKey) {
@@ -3266,8 +3297,10 @@ function runPulseTaskTests() {
   assert_('cross-midnight duration', calculateDurationMinutes('23:30', '00:30') === 60);
   assert_('static task reference', /^(S\d+)$/.test('S12'));
   assert_('dynamic task reference', /^(D[A-Za-z0-9-]+)$/.test('D20260702-R12-V1'));
-  assert_('started task remains open', isOpenDynamicTaskStatus_('Started'));
-  assert_('completed task is closed', !isOpenDynamicTaskStatus_('Completed'));
+  assert_('queued task is actionable', isActionableDynamicTaskStatus_('Queued'));
+  assert_('queued task is not scheduled', !isScheduledDynamicTaskStatus_('Queued'));
+  assert_('started task remains scheduled', isScheduledDynamicTaskStatus_('Started'));
+  assert_('completed task is closed', !isActionableDynamicTaskStatus_('Completed'));
   assert_(
     'stable Telegram task reference',
     generateTelegramTaskId('2026-07-02', '09:30', 'TG20260702093000ABC123') === '20260702-0930-TGABC123'

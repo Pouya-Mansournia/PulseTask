@@ -27,6 +27,8 @@ Confirmed tasks added without immediately starting them are appended to it;
 cancelled drafts and **Add & Start** tasks are not.
 The normal `Dynamic_Schedule` record is still created, so existing scheduling,
 tracking, and **Add & Start** behavior remain unchanged.
+Queue records use status `Queued` and are excluded from busy-time calculations
+until selected, so pending ideas cannot delay new free-slot suggestions.
 
 | Column | Header | Meaning |
 |---|---|---|
