@@ -31,7 +31,7 @@ export default {
       return Response.json({
         ok: true,
         service: "PulseTask Telegram Worker",
-        version: "2.2-queue-picker",
+        version: "2.3-hourly-check-ins",
       });
     }
 
@@ -110,7 +110,7 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
 async function processCallbackAction(env, parsed, chatId, messageId, actionData) {
   const result = await sendToAppsScript(env, actionData);
 
-  if ((parsed.draftId || parsed.queueTask) && messageId) {
+  if ((parsed.draftId || parsed.queueTask || parsed.queueFollowUp) && messageId) {
     try {
       await callTelegramApi(env, "deleteMessage", {
         chat_id: chatId,
@@ -125,8 +125,21 @@ async function processCallbackAction(env, parsed, chatId, messageId, actionData)
     await sendTelegramMessage(
       env,
       chatId,
-      [`▶️ Started from Queue`, "", result.task].join("\n")
+      [
+        `▶️ Started from Queue`,
+        "",
+        result.task,
+        result.start && result.finish ? `🕐 ${result.start}–${result.finish}` : "",
+        "I’ll check in again in one hour.",
+      ].filter(Boolean).join("\n")
     );
+  }
+
+  if (parsed.queueFollowUp && result?.task) {
+    const message = parsed.action === "finish_queue_task"
+      ? [`✅ Completed`, "", result.task]
+      : [`➕ Continued for one more hour`, "", result.task, `Planned until ${result.finish}`];
+    await sendTelegramMessage(env, chatId, message.join("\n"));
   }
 
   return result;
@@ -179,6 +192,25 @@ function parseCallbackData(data) {
       energyValue: null,
       queueTask: true,
       confirmation: "Starting queued task...",
+    };
+  }
+
+  if (["qdone", "qcontinue"].includes(action)) {
+    const taskRef = normalizeTaskRef(parts[1]);
+
+    if (!isValidTaskRef(taskRef)) {
+      return { ok: false, message: "Invalid active task reference." };
+    }
+
+    const isDone = action === "qdone";
+    return {
+      ok: true,
+      action: isDone ? "finish_queue_task" : "continue_queue_task",
+      draftId: null,
+      taskRef: taskRef,
+      energyValue: null,
+      queueFollowUp: true,
+      confirmation: isDone ? "Completing task..." : "Adding another hour...",
     };
   }
 

@@ -30,6 +30,11 @@ const CONFIG = {
   TELEGRAM_QUEUE_START_ROW: 1,
   TELEGRAM_QUEUE_START_COLUMN: 12,
 
+  // Live one-hour work sessions on the main Time/Plan sheet (starts at R1)
+  ACTIVE_SESSION_START_ROW: 1,
+  ACTIVE_SESSION_START_COLUMN: 18,
+  ACTIVE_SESSION_BLOCK_MINUTES: 60,
+
   // Reminder configuration
   REMINDER_MINUTES_BEFORE: 60,
   REMINDER_WINDOW_MINUTES: 5,
@@ -135,6 +140,14 @@ function doPost(e) {
     } else if (action === 'start_queue_task') {
       validateTaskRef(taskRef);
       return createJsonResponse(startTelegramQueueTask_(taskRef));
+
+    } else if (action === 'continue_queue_task') {
+      validateTaskRef(taskRef);
+      return createJsonResponse(continueTelegramQueueTask_(taskRef));
+
+    } else if (action === 'finish_queue_task') {
+      validateTaskRef(taskRef);
+      return createJsonResponse(finishTelegramQueueTask_(taskRef));
 
     } else {
       throw new Error(`Unknown action: ${action}`);
@@ -1179,19 +1192,68 @@ function startTelegramQueueTask_(taskRef) {
     return { ok: false, error: 'This task is no longer available in Queue.' };
   }
 
-  const taskInfo = getTaskInfoByRef(taskRef);
-  if (!taskInfo.ok) {
-    return { ok: false, error: taskInfo.message };
-  }
-
+  // Validate the visible destination before changing task state.
+  ensureActiveSessionSection_();
+  const session = scheduleDynamicTaskNow_(taskRef, CONFIG.ACTIVE_SESSION_BLOCK_MINUTES);
   const result = markTaskAsStarted(taskRef);
+  upsertActiveSession_(session.taskInfo, session.startedAt, session.plannedUntil, 'In Progress');
+  scheduleQueueFollowUp_(taskRef);
   removeTelegramQueueItem_(queueItem.rowNumber);
 
   return {
     ok: true,
     taskRef: taskRef,
-    task: taskInfo.task,
+    task: session.taskInfo.task,
+    start: formatTime(session.startedAt),
+    finish: formatTime(session.plannedUntil),
     message: result && result.message ? result.message : 'Task started from Queue.'
+  };
+}
+
+/** Extends an in-progress Queue task by one hour and schedules another check-in. */
+function continueTelegramQueueTask_(taskRef) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const taskInfo = getTaskInfoByRef(taskRef);
+    if (!taskInfo.ok) return { ok: false, error: taskInfo.message };
+
+    const state = getTrackedTaskState(taskInfo);
+    if (state.status !== 'Started') {
+      return { ok: false, error: 'This task is not currently running.' };
+    }
+
+    const extension = extendDynamicTaskPlan_(taskInfo, CONFIG.ACTIVE_SESSION_BLOCK_MINUTES);
+    upsertActiveSession_(taskInfo, extension.startedAt, extension.plannedUntil, 'In Progress');
+    scheduleQueueFollowUp_(taskRef);
+
+    return {
+      ok: true,
+      taskRef: taskRef,
+      task: taskInfo.task,
+      finish: formatTime(extension.plannedUntil),
+      message: 'Task extended by one hour.'
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Completes an in-progress Queue task and closes its Time/Plan session. */
+function finishTelegramQueueTask_(taskRef) {
+  const taskInfo = getTaskInfoByRef(taskRef);
+  if (!taskInfo.ok) return { ok: false, error: taskInfo.message };
+
+  const result = markTaskAsDone(taskRef);
+  updateActiveSessionStatus_(taskRef, 'Done');
+  clearQueueFollowUpsForTask_(taskRef);
+
+  return {
+    ok: true,
+    taskRef: taskRef,
+    task: taskInfo.task,
+    message: result && result.message ? result.message : 'Task completed.'
   };
 }
 
@@ -1223,6 +1285,228 @@ function removeTelegramQueueItem_(rowNumber) {
     .getRange(numericRow, CONFIG.TELEGRAM_QUEUE_START_COLUMN, 1, 6)
     .clearContent()
     .clearFormat();
+}
+
+/** Moves a queued dynamic task to a one-hour block beginning now. */
+function scheduleDynamicTaskNow_(taskRef, durationMinutes) {
+  const taskInfo = getTaskInfoByRef(taskRef);
+  if (!taskInfo.ok) throw new Error(taskInfo.message);
+  if (!taskInfo.isDynamic) throw new Error('Only dynamic Queue tasks can be started here.');
+
+  const startedAt = getNowInConfiguredTimezone();
+  const plannedUntil = new Date(startedAt.getTime() + Number(durationMinutes || 60) * 60000);
+  const sheet = getDynamicScheduleSheet();
+  const row = taskInfo.dynamicSheetRow;
+
+  sheet.getRange(row, 4).setValue(formatDateKey(startedAt));
+  sheet.getRange(row, 9).setValue(formatTime(startedAt));
+  sheet.getRange(row, 10).setValue(formatTime(plannedUntil));
+  sheet.getRange(row, 22).setValue(Number(durationMinutes || 60));
+
+  return {
+    taskInfo: getTaskInfoByRef(taskRef),
+    startedAt: startedAt,
+    plannedUntil: plannedUntil
+  };
+}
+
+/** Extends the planned finish of a running dynamic task. */
+function extendDynamicTaskPlan_(taskInfo, extensionMinutes) {
+  const item = getDynamicTaskById(taskInfo.dynamicId);
+  if (!item) throw new Error(`Dynamic task not found: ${taskInfo.dynamicId}`);
+
+  const now = getNowInConfiguredTimezone();
+  let plannedUntil = combineDateKeyWithTime(item.scheduleDate, item.newFinish);
+  if (plannedUntil <= combineDateKeyWithTime(item.scheduleDate, item.newStart)) {
+    plannedUntil.setDate(plannedUntil.getDate() + 1);
+  }
+
+  const extensionBase = plannedUntil > now ? plannedUntil : now;
+  const extendedUntil = new Date(extensionBase.getTime() + Number(extensionMinutes || 60) * 60000);
+  const plannedMinutes = Number(item.plannedMinutes || 0) + Number(extensionMinutes || 60);
+  const sheet = getDynamicScheduleSheet();
+
+  sheet.getRange(item.sheetRow, 10).setValue(formatTime(extendedUntil));
+  sheet.getRange(item.sheetRow, 22).setValue(plannedMinutes);
+
+  return {
+    startedAt: stateTimestampToDate_(item.startedAt) || now,
+    plannedUntil: extendedUntil
+  };
+}
+
+function stateTimestampToDate_(value) {
+  if (!value) return null;
+  try {
+    return Utilities.parseDate(cleanCell(value), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+  } catch (error) {
+    const parsed = new Date(value);
+    return !isNaN(parsed.getTime()) ? parsed : null;
+  }
+}
+
+/** Creates the live session area at R1:X on the main Time/Plan sheet. */
+function ensureActiveSessionSection_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet not found: ${CONFIG.SHEET_NAME}`);
+
+  const startRow = CONFIG.ACTIVE_SESSION_START_ROW;
+  const startColumn = CONFIG.ACTIVE_SESSION_START_COLUMN;
+  const headers = ['Date', 'Start', 'Finish', 'Category', 'Task', 'Task Ref', 'Status'];
+  const requiredLastColumn = startColumn + headers.length - 1;
+
+  if (sheet.getMaxColumns() < requiredLastColumn) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredLastColumn - sheet.getMaxColumns());
+  }
+
+  const titleCell = sheet.getRange(startRow, startColumn);
+  const currentTitle = cleanCell(titleCell.getDisplayValue());
+  if (currentTitle && currentTitle !== 'Active Sessions') {
+    throw new Error('Cannot create Active Sessions: cell R1 already contains other data.');
+  }
+
+  const headerRange = sheet.getRange(startRow + 1, startColumn, 1, headers.length);
+  const currentHeaders = headerRange.getDisplayValues()[0].map(cleanCell);
+  const conflict = currentHeaders.find((value, index) => value && value !== headers[index]);
+  if (conflict) {
+    throw new Error('Cannot create Active Sessions: cells R2:X2 already contain other data.');
+  }
+
+  titleCell.setValue('Active Sessions').setFontWeight('bold').setFontColor('#ffffff').setBackground('#1a73e8');
+  sheet.getRange(startRow, startColumn, 1, headers.length).setBackground('#1a73e8');
+  headerRange.setValues([headers]).setFontWeight('bold').setFontColor('#ffffff').setBackground('#4285f4');
+  sheet.setColumnWidth(startColumn + 4, 320);
+
+  return sheet;
+}
+
+function upsertActiveSession_(taskInfo, startedAt, plannedUntil, status) {
+  const sheet = ensureActiveSessionSection_();
+  const startColumn = CONFIG.ACTIVE_SESSION_START_COLUMN;
+  const firstDataRow = CONFIG.ACTIVE_SESSION_START_ROW + 2;
+  const existingRow = findActiveSessionRow_(taskInfo.taskRef, sheet);
+  const targetRow = existingRow || findNextActiveSessionRow_(sheet);
+
+  sheet.getRange(targetRow, startColumn, 1, 7).setValues([[
+    formatDateKey(startedAt),
+    formatTime(startedAt),
+    formatTime(plannedUntil),
+    taskInfo.state || 'Uncategorized',
+    taskInfo.task || '',
+    taskInfo.taskRef,
+    status || 'In Progress'
+  ]]).setWrap(true).setVerticalAlignment('top');
+}
+
+function updateActiveSessionStatus_(taskRef, status) {
+  const sheet = ensureActiveSessionSection_();
+  const row = findActiveSessionRow_(taskRef, sheet);
+  if (!row) return;
+  if (status === 'Done') {
+    sheet.getRange(row, CONFIG.ACTIVE_SESSION_START_COLUMN + 2).setValue(formatTime(new Date()));
+  }
+  sheet.getRange(row, CONFIG.ACTIVE_SESSION_START_COLUMN + 6).setValue(status);
+}
+
+function findNextActiveSessionRow_(sheet) {
+  const firstDataRow = CONFIG.ACTIVE_SESSION_START_ROW + 2;
+  const lastRow = Math.max(firstDataRow, sheet.getLastRow());
+  const rows = sheet
+    .getRange(firstDataRow, CONFIG.ACTIVE_SESSION_START_COLUMN, lastRow - firstDataRow + 1, 7)
+    .getDisplayValues();
+
+  const emptyIndex = rows.findIndex(row => row.every(value => !cleanCell(value)));
+  return emptyIndex >= 0 ? firstDataRow + emptyIndex : lastRow + 1;
+}
+
+function findActiveSessionRow_(taskRef, sheet) {
+  const targetSheet = sheet || ensureActiveSessionSection_();
+  const firstDataRow = CONFIG.ACTIVE_SESSION_START_ROW + 2;
+  const lastRow = targetSheet.getLastRow();
+  if (lastRow < firstDataRow) return null;
+
+  const refs = targetSheet
+    .getRange(firstDataRow, CONFIG.ACTIVE_SESSION_START_COLUMN + 5, lastRow - firstDataRow + 1, 1)
+    .getDisplayValues();
+
+  for (let index = refs.length - 1; index >= 0; index--) {
+    if (cleanCell(refs[index][0]) === cleanCell(taskRef)) return firstDataRow + index;
+  }
+  return null;
+}
+
+/** Schedules a one-hour Telegram Done/Continue check-in for a running task. */
+function scheduleQueueFollowUp_(taskRef) {
+  clearQueueFollowUpsForTask_(taskRef);
+  const trigger = ScriptApp
+    .newTrigger('sendQueueTaskFollowUp')
+    .timeBased()
+    .after(CONFIG.ACTIVE_SESSION_BLOCK_MINUTES * 60000)
+    .create();
+
+  PropertiesService.getScriptProperties().setProperty(
+    `QUEUE_FOLLOWUP_${trigger.getUniqueId()}`,
+    JSON.stringify({ taskRef: taskRef, createdAt: new Date().toISOString() })
+  );
+}
+
+function sendQueueTaskFollowUp(e) {
+  const triggerUid = cleanCell(e && e.triggerUid);
+  const propertyKey = `QUEUE_FOLLOWUP_${triggerUid}`;
+  const properties = PropertiesService.getScriptProperties();
+  const raw = triggerUid ? properties.getProperty(propertyKey) : '';
+
+  try {
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    const taskInfo = getTaskInfoByRef(data.taskRef);
+    if (!taskInfo.ok) return;
+
+    const state = getTrackedTaskState(taskInfo);
+    if (state.status !== 'Started') return;
+
+    sendTelegramMessageWithKeyboard([
+      '⏰ One-hour check-in',
+      '',
+      `📌 ${taskInfo.task}`,
+      '',
+      'Did you finish, or do you want to continue for another hour?'
+    ].join('\n'), {
+      inline_keyboard: [[
+        { text: '✅ Done', callback_data: `qdone:${taskInfo.taskRef}` },
+        { text: '➕ Continue 1h', callback_data: `qcontinue:${taskInfo.taskRef}` }
+      ]]
+    });
+  } finally {
+    if (triggerUid) {
+      properties.deleteProperty(propertyKey);
+      ScriptApp.getProjectTriggers()
+        .filter(trigger => trigger.getUniqueId() === triggerUid)
+        .forEach(trigger => ScriptApp.deleteTrigger(trigger));
+    }
+  }
+}
+
+function clearQueueFollowUpsForTask_(taskRef) {
+  const properties = PropertiesService.getScriptProperties();
+  const allProperties = properties.getProperties();
+  const triggerIds = [];
+
+  Object.keys(allProperties).forEach(key => {
+    if (!key.startsWith('QUEUE_FOLLOWUP_')) return;
+    try {
+      const data = JSON.parse(allProperties[key]);
+      if (cleanCell(data.taskRef) !== cleanCell(taskRef)) return;
+      triggerIds.push(key.replace('QUEUE_FOLLOWUP_', ''));
+      properties.deleteProperty(key);
+    } catch (error) {
+      Logger.log(`Invalid Queue follow-up property ignored: ${key}`);
+    }
+  });
+
+  ScriptApp.getProjectTriggers()
+    .filter(trigger => triggerIds.includes(trigger.getUniqueId()))
+    .forEach(trigger => ScriptApp.deleteTrigger(trigger));
 }
 
 function generateTelegramTaskId(dateKey, startTime, stableSeed) {
@@ -2530,6 +2814,10 @@ function installProjectTriggers() {
 
 function deleteProjectTriggers() {
   ScriptApp.getProjectTriggers().forEach(trigger => ScriptApp.deleteTrigger(trigger));
+  const properties = PropertiesService.getScriptProperties();
+  Object.keys(properties.getProperties())
+    .filter(key => key.startsWith('QUEUE_FOLLOWUP_'))
+    .forEach(key => properties.deleteProperty(key));
 }
 
 function fullResetSystem() {
@@ -3020,6 +3308,7 @@ function initializePulseTask() {
     validatePulseTaskConfiguration_();
     ensureGeneratedSheetsExist_();
     ensureTelegramQueueSection_();
+    ensureActiveSessionSection_();
     installProjectTriggers();
     buildEnergyHeatmapSheet(7);
 

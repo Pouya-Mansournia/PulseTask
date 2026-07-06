@@ -17,6 +17,7 @@ PulseTask turns a weekly Google Sheets schedule into an interactive Telegram wor
 - 📝 Creates a preview before saving an unplanned Telegram task
 - ✅ Removes completed draft cards from the chat after **Add**, **Add & Start**, or **Cancel**
 - 📥 Keeps unstarted Telegram tasks in a **Queue** at `L1` and lets you pick one to start from Telegram
+- ⏳ Writes selected Queue work into **Active Sessions** on `Time/Plan` and checks in every hour
 - 🎯 Supports Done, Skip, Start, Pause, Later, and smart Reschedule actions
 - 🔄 Finds the nearest conflict-free slot across the next seven days
 - 🔥 Records energy from 1–5 and builds a seven-day hourly heatmap
@@ -57,7 +58,7 @@ Send `/start` once to install the persistent **➕ Add Task** and **📥 Queue**
 
 After a successful action, the draft card is deleted to keep the chat clean. If saving fails, it stays visible so the action can be retried.
 
-Tasks saved with **Add** are placed in the Queue. Press **📥 Queue** (or send `/queue`) to see up to 12 pending tasks, then select the one you want to do now. PulseTask starts its timer, removes it from the visible Queue, and keeps **Start → Pause → Start → Done** tracking available. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
+Tasks saved with **Add** are placed in the Queue. Press **📥 Queue** (or send `/queue`) to see up to 12 pending tasks, then select the one you want to do now. PulseTask creates a one-hour block in the **Active Sessions** area of the same `Time/Plan` sheet, starts its timer, and removes it from Queue. After one hour Telegram asks whether the task is **Done** or should **Continue 1h**. Continuing extends the sheet's Finish time and schedules the next hourly check-in. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
 
 Plain text also creates a task draft. Supported input formats include:
 
@@ -202,7 +203,7 @@ Opening the resulting `workers.dev` URL should return a health response similar 
 {
   "ok": true,
   "service": "PulseTask Telegram Worker",
-  "version": "2.2-queue-picker"
+  "version": "2.3-hourly-check-ins"
 }
 ```
 
@@ -271,7 +272,7 @@ PulseTask creates and maintains these tabs:
 
 Static tasks use references such as `S12`. Dynamic tasks use references such as `D20260702-R12-V1` or Telegram-generated IDs.
 
-The main schedule sheet also exposes the Telegram Queue at `L1:Q`. See [`docs/GOOGLE_SHEETS_SCHEMA.md`](docs/GOOGLE_SHEETS_SCHEMA.md) for its columns and lifecycle.
+The main schedule sheet exposes the Telegram Queue at `L1:Q` and live execution blocks at `R1:X`. See [`docs/GOOGLE_SHEETS_SCHEMA.md`](docs/GOOGLE_SHEETS_SCHEMA.md) for their columns and lifecycle.
 
 ### Dynamic task lifecycle
 
@@ -323,6 +324,8 @@ RESCHEDULE_SEARCH_DAYS: 7
 - `checkUpcomingTaskReminders` every five minutes
 - `sendWeeklyWellbeingReport` every Friday around 23:45
 
+Starting a Queue task also creates a one-time `sendQueueTaskFollowUp` trigger. Choosing **Continue 1h** replaces it with another one-hour trigger; completing the task removes pending follow-ups.
+
 Run the non-destructive internal checks from Apps Script:
 
 ```javascript
@@ -337,8 +340,8 @@ Recommended end-to-end checks:
 2. Run `runPulseTaskTests()` and `testTelegram()`.
 3. Deploy both Apps Script and the Worker.
 4. Send `/start`, press **Add Task**, and confirm a draft with **Add**.
-5. Press **Queue**, select the new task, and verify that it starts and disappears from the Queue.
-6. Pause, resume, and complete the selected task.
+5. Press **Queue**, select the new task, and verify that it starts, disappears from Queue, and appears under **Active Sessions**.
+6. Verify the one-hour **Done / Continue 1h** check-in; Continue must extend Finish by one hour.
 7. Run `testNextUpcomingReminder()` or send `/test`.
 8. Verify actions in `Action_Log` and energy in `Mood_Log`.
 9. Send `/today`, `/week`, and `/heatmap`.

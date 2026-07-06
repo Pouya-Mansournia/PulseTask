@@ -41,6 +41,24 @@ Use the persistent **📥 Queue** Telegram button (or `/queue`) to list pending
 items. Selecting one starts its timer and clears it from the visible Queue.
 Rows can still be removed manually when needed.
 
+### Active Sessions
+
+The same main sheet contains date-specific execution blocks beginning at `R1`.
+Selecting a Queue task writes a one-hour session here without overwriting the
+recurring weekday plan. Telegram checks in after one hour; **Continue 1h**
+extends the Finish value and schedules another check-in, while **Done** records
+the actual finish time and closes the session.
+
+| Column | Header | Meaning |
+|---|---|---|
+| R | Date | Date the task was started |
+| S | Start | Actual session start |
+| T | Finish | Current planned or actual finish |
+| U | Category | Task category |
+| V | Task | Task description |
+| W | Task Ref | Dynamic task reference |
+| X | Status | `In Progress` or `Done` |
+
 ## Action_Log
 
 | Column | Meaning |
