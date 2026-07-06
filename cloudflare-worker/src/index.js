@@ -31,7 +31,7 @@ export default {
       return Response.json({
         ok: true,
         service: "PulseTask Telegram Worker",
-        version: "2.1-telegram-drafts",
+        version: "2.2-queue-picker",
       });
     }
 
@@ -110,7 +110,7 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
 async function processCallbackAction(env, parsed, chatId, messageId, actionData) {
   const result = await sendToAppsScript(env, actionData);
 
-  if (parsed.draftId && messageId) {
+  if ((parsed.draftId || parsed.queueTask) && messageId) {
     try {
       await callTelegramApi(env, "deleteMessage", {
         chat_id: chatId,
@@ -119,6 +119,14 @@ async function processCallbackAction(env, parsed, chatId, messageId, actionData)
     } catch (error) {
       console.error("Could not delete the completed draft message:", error);
     }
+  }
+
+  if (parsed.queueTask && result?.task) {
+    await sendTelegramMessage(
+      env,
+      chatId,
+      [`▶️ Started from Queue`, "", result.task].join("\n")
+    );
   }
 
   return result;
@@ -153,6 +161,24 @@ function parseCallbackData(data) {
       taskRef: taskRef,
       energyValue: null,
       confirmation: confirmations[action],
+    };
+  }
+
+  if (action === "qstart") {
+    const taskRef = normalizeTaskRef(parts[1]);
+
+    if (!isValidTaskRef(taskRef)) {
+      return { ok: false, message: "Invalid queue task reference." };
+    }
+
+    return {
+      ok: true,
+      action: "start_queue_task",
+      draftId: null,
+      taskRef: taskRef,
+      energyValue: null,
+      queueTask: true,
+      confirmation: "Starting queued task...",
     };
   }
 
@@ -267,8 +293,9 @@ async function handleIncomingMessage(message, env, ctx) {
         "Hello 👋",
         "",
         "PulseTask is online.",
-        "Use the ➕ Add Task button below whenever you want to add a task.",
+        "Use the buttons below to add a task or pick something from your Queue.",
         "",
+        "/queue — Pick a pending task to start now",
         "/today — Generate today’s report",
         "/week — Generate the weekly report",
         "/heatmap — Update the energy heatmap",
@@ -288,6 +315,7 @@ async function handleIncomingMessage(message, env, ctx) {
       "/add Review PulseTask changes",
       "/add 18:30-20:00 | PulseTask | Improve Telegram integration",
       "/add 90m | Research | Read robotics paper",
+      "/queue to pick a pending task and start it now",
       "",
       "You can also send plain text directly and I will suggest the next available free slot automatically.",
     ].join("\n"));
@@ -328,6 +356,11 @@ async function handleIncomingMessage(message, env, ctx) {
     return;
   }
 
+  if (rawText === "📥 Queue" || text.startsWith("/queue")) {
+    await sendQueueList(env, chatId);
+    return;
+  }
+
   if (text.startsWith("/test")) {
     await sendTestTask(env, chatId);
     return;
@@ -355,7 +388,7 @@ async function handleIncomingMessage(message, env, ctx) {
     await sendTelegramMessage(env, chatId, [
       "⚠️ Unknown command.",
       "",
-      "Use /add to create a task, /today for a report, /week for the weekly report, or /help for examples.",
+      "Use /add to create a task, /queue to pick pending work, /today for a report, /week for the weekly report, or /help for examples.",
     ].join("\n"));
     return;
   }
@@ -387,11 +420,53 @@ async function handleIncomingMessage(message, env, ctx) {
 
 function getMainMenuKeyboard(inputPlaceholder) {
   return {
-    keyboard: [[{ text: "➕ Add Task" }]],
+    keyboard: [[{ text: "➕ Add Task" }, { text: "📥 Queue" }]],
     resize_keyboard: true,
     is_persistent: true,
     input_field_placeholder: inputPlaceholder || "Choose an action...",
   };
+}
+
+async function sendQueueList(env, chatId) {
+  const result = await sendToAppsScript(env, {
+    action: "list_queue",
+    telegramChatId: chatId,
+    createdAt: new Date().toISOString(),
+  });
+  const items = Array.isArray(result?.items) ? result.items : [];
+
+  if (items.length === 0) {
+    await sendTelegramMessage(env, chatId, "📭 Your Queue is empty.");
+    return;
+  }
+
+  const buttons = items.map((item) => [{
+    text: formatQueueButtonLabel(item),
+    callback_data: `qstart:${item.taskRef}`,
+  }]);
+  const remaining = Math.max(0, Number(result.total || items.length) - items.length);
+  const footer = remaining > 0
+    ? `\n\nShowing ${items.length} tasks. ${remaining} more remain in the sheet.`
+    : "";
+
+  await sendTelegramMessageWithKeyboard(
+    env,
+    chatId,
+    `📥 Queue\n\nWhich task do you feel like doing now?${footer}`,
+    { inline_keyboard: buttons }
+  );
+}
+
+function formatQueueButtonLabel(item) {
+  const task = String(item?.task || "Untitled task").replace(/\s+/g, " ").trim();
+  const duration = String(item?.duration || "").trim();
+  const suffix = duration ? ` · ${duration}` : "";
+  const maxTaskLength = Math.max(12, 48 - suffix.length);
+  const shortTask = task.length > maxTaskLength
+    ? `${task.slice(0, maxTaskLength - 1)}…`
+    : task;
+
+  return `▶️ ${shortTask}${suffix}`;
 }
 
 async function sendTestTask(env, chatId) {

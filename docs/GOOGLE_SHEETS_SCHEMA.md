@@ -23,7 +23,8 @@ Friday
 ### Telegram Queue
 
 The main schedule sheet also contains a lightweight inbox beginning at `N2`.
-Only confirmed Telegram tasks are appended to it; cancelled drafts are not.
+Confirmed tasks added without immediately starting them are appended to it;
+cancelled drafts and **Add & Start** tasks are not.
 The normal `Dynamic_Schedule` record is still created, so existing scheduling,
 tracking, and **Add & Start** behavior remain unchanged.
 
@@ -36,8 +37,9 @@ tracking, and **Add & Start** behavior remain unchanged.
 | R | Suggested Slot | Slot selected by the existing scheduler |
 | S | Task Ref | Reference used to prevent duplicate Queue rows |
 
-Move or copy Queue items into the weekday plan when you decide where they
-belong, then remove the Queue row manually.
+Use the persistent **📥 Queue** Telegram button (or `/queue`) to list pending
+items. Selecting one starts its timer and clears it from the visible Queue.
+Rows can still be removed manually when needed.
 
 ## Action_Log
 

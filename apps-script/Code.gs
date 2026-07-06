@@ -129,6 +129,13 @@ function doPost(e) {
       const result = cancelTaskDraft(payload.draftId, payload.telegramChatId || payload.chatId);
       return createJsonResponse(result);
 
+    } else if (action === 'list_queue') {
+      return createJsonResponse(getTelegramQueueItems_());
+
+    } else if (action === 'start_queue_task') {
+      validateTaskRef(taskRef);
+      return createJsonResponse(startTelegramQueueTask_(taskRef));
+
     } else {
       throw new Error(`Unknown action: ${action}`);
     }
@@ -980,7 +987,9 @@ function createTelegramDynamicTask(draft, startImmediately) {
   // Validate/create the visible inbox before committing the generated record.
   ensureTelegramQueueSection_();
   appendDynamicScheduleRow(item);
-  appendTelegramQueueItem_(item, `D${taskId}`);
+  if (!startImmediately) {
+    appendTelegramQueueItem_(item, `D${taskId}`);
+  }
 
   if (startImmediately) {
     const taskInfo = {
@@ -1119,6 +1128,103 @@ function appendTelegramQueueItem_(item, taskRef) {
     .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
 }
 
+/** Returns active Queue tasks for Telegram, newest additions first. */
+function getTelegramQueueItems_() {
+  const sheet = ensureTelegramQueueSection_();
+  const firstDataRow = CONFIG.TELEGRAM_QUEUE_START_ROW + 2;
+  const startColumn = CONFIG.TELEGRAM_QUEUE_START_COLUMN;
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < firstDataRow) {
+    return { ok: true, items: [], total: 0 };
+  }
+
+  const activeDynamicIds = {};
+  getAllDynamicTasks().forEach(item => {
+    activeDynamicIds[`D${item.dynamicId}`] = item.status === 'Active';
+  });
+
+  const items = sheet
+    .getRange(firstDataRow, startColumn, lastRow - firstDataRow + 1, 6)
+    .getDisplayValues()
+    .map((row, index) => ({
+      rowNumber: firstDataRow + index,
+      addedAt: cleanCell(row[0]),
+      category: cleanCell(row[1]),
+      task: cleanCell(row[2]),
+      duration: cleanCell(row[3]),
+      suggestedSlot: cleanCell(row[4]),
+      taskRef: cleanCell(row[5])
+    }))
+    .filter(item => item.task && /^(D[A-Za-z0-9-]+)$/.test(item.taskRef) && activeDynamicIds[item.taskRef])
+    .reverse();
+
+  return {
+    ok: true,
+    items: items.slice(0, 12).map(item => ({
+      taskRef: item.taskRef,
+      category: item.category,
+      task: item.task,
+      duration: item.duration,
+      suggestedSlot: item.suggestedSlot
+    })),
+    total: items.length
+  };
+}
+
+/** Starts a selected Queue task and removes it from the visible inbox. */
+function startTelegramQueueTask_(taskRef) {
+  const queueItem = findTelegramQueueItem_(taskRef);
+  if (!queueItem) {
+    return { ok: false, error: 'This task is no longer available in Queue.' };
+  }
+
+  const taskInfo = getTaskInfoByRef(taskRef);
+  if (!taskInfo.ok) {
+    return { ok: false, error: taskInfo.message };
+  }
+
+  const result = markTaskAsStarted(taskRef);
+  removeTelegramQueueItem_(queueItem.rowNumber);
+
+  return {
+    ok: true,
+    taskRef: taskRef,
+    task: taskInfo.task,
+    message: result && result.message ? result.message : 'Task started from Queue.'
+  };
+}
+
+function findTelegramQueueItem_(taskRef) {
+  const sheet = ensureTelegramQueueSection_();
+  const firstDataRow = CONFIG.TELEGRAM_QUEUE_START_ROW + 2;
+  const startColumn = CONFIG.TELEGRAM_QUEUE_START_COLUMN;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < firstDataRow) return null;
+
+  const refs = sheet
+    .getRange(firstDataRow, startColumn + 5, lastRow - firstDataRow + 1, 1)
+    .getDisplayValues();
+
+  for (let index = 0; index < refs.length; index++) {
+    if (cleanCell(refs[index][0]) === cleanCell(taskRef)) {
+      return { rowNumber: firstDataRow + index, taskRef: taskRef };
+    }
+  }
+
+  return null;
+}
+
+function removeTelegramQueueItem_(rowNumber) {
+  const numericRow = Number(rowNumber || 0);
+  if (!Number.isInteger(numericRow) || numericRow < CONFIG.TELEGRAM_QUEUE_START_ROW + 2) return;
+
+  ensureTelegramQueueSection_()
+    .getRange(numericRow, CONFIG.TELEGRAM_QUEUE_START_COLUMN, 1, 6)
+    .clearContent()
+    .clearFormat();
+}
+
 function generateTelegramTaskId(dateKey, startTime, stableSeed) {
   const normalizedDate = String(dateKey || '').replace(/-/g, '');
   const normalizedStart = String(startTime || '').replace(/:/g, '');
@@ -1171,8 +1277,8 @@ function getTaskInfoByRef(taskRef) {
     const dynamicId = taskRef.substring(1);
     const item = getDynamicTaskById(dynamicId);
 
-    if (!item || item.status !== 'Active') {
-      return { ok: false, message: `Active dynamic task not found: ${dynamicId}` };
+    if (!item || !isOpenDynamicTaskStatus_(item.status)) {
+      return { ok: false, message: `Open dynamic task not found: ${dynamicId}` };
     }
 
     return {
@@ -1821,7 +1927,11 @@ function getAllDynamicTasks() {
 }
 
 function getAllActiveDynamicTasks() {
-  return getAllDynamicTasks().filter(item => item.status === 'Active');
+  return getAllDynamicTasks().filter(item => isOpenDynamicTaskStatus_(item.status));
+}
+
+function isOpenDynamicTaskStatus_(status) {
+  return ['Active', 'Started', 'Paused'].includes(cleanCell(status));
 }
 
 function getActiveDynamicTasksForDate(dateKey) {
@@ -2868,6 +2978,8 @@ function runPulseTaskTests() {
   assert_('cross-midnight duration', calculateDurationMinutes('23:30', '00:30') === 60);
   assert_('static task reference', /^(S\d+)$/.test('S12'));
   assert_('dynamic task reference', /^(D[A-Za-z0-9-]+)$/.test('D20260702-R12-V1'));
+  assert_('started task remains open', isOpenDynamicTaskStatus_('Started'));
+  assert_('completed task is closed', !isOpenDynamicTaskStatus_('Completed'));
   assert_(
     'stable Telegram task reference',
     generateTelegramTaskId('2026-07-02', '09:30', 'TG20260702093000ABC123') === '20260702-0930-TGABC123'

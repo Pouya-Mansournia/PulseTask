@@ -16,7 +16,7 @@ PulseTask turns a weekly Google Sheets schedule into an interactive Telegram wor
 - ➕ Provides a persistent **Add Task** button—no `/add` command required
 - 📝 Creates a preview before saving an unplanned Telegram task
 - ✅ Removes completed draft cards from the chat after **Add**, **Add & Start**, or **Cancel**
-- 📥 Mirrors every confirmed Telegram task into a **Queue** at `N2` on the main sheet for later weekly planning
+- 📥 Keeps unstarted Telegram tasks in a **Queue** at `N2` and lets you pick one to start from Telegram
 - 🎯 Supports Done, Skip, Start, Pause, Later, and smart Reschedule actions
 - 🔄 Finds the nearest conflict-free slot across the next seven days
 - 🔥 Records energy from 1–5 and builds a seven-day hourly heatmap
@@ -40,7 +40,7 @@ flowchart LR
 
 | Component | Responsibility |
 |---|---|
-| Telegram | User interface, commands, inline actions, and persistent Add Task button |
+| Telegram | User interface, commands, inline actions, and persistent Add Task and Queue buttons |
 | Cloudflare Worker | Webhook handling, chat authorization, callback parsing, and fast acknowledgements |
 | Google Apps Script | Scheduling logic, task state, reports, triggers, and Telegram delivery |
 | Google Sheets | Weekly plan, dynamic schedule, logs, reports, and energy heatmap |
@@ -49,13 +49,15 @@ The Telegram webhook points to Cloudflare—not directly to Apps Script. Worker-
 
 ## Telegram experience
 
-Send `/start` once to install the persistent **➕ Add Task** button below the chat. Press it, type the task, review the generated draft, then choose:
+Send `/start` once to install the persistent **➕ Add Task** and **📥 Queue** buttons below the chat. Add new work normally, or open Queue whenever your schedule is empty and pick a pending task to start.
 
 - **Add** — save the task
 - **Add & Start** — save it and start timing immediately
 - **Cancel** — discard the draft
 
 After a successful action, the draft card is deleted to keep the chat clean. If saving fails, it stays visible so the action can be retried.
+
+Tasks saved with **Add** are placed in the Queue. Press **📥 Queue** (or send `/queue`) to see up to 12 pending tasks, then select the one you want to do now. PulseTask starts its timer, removes it from the visible Queue, and keeps **Start → Pause → Start → Done** tracking available. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
 
 Plain text also creates a task draft. Supported input formats include:
 
@@ -74,7 +76,8 @@ When no time is supplied, PulseTask suggests the nearest available 60-minute slo
 
 | Command | Result |
 |---|---|
-| `/start` | Opens PulseTask and installs the persistent Add Task button |
+| `/start` | Opens PulseTask and installs the persistent Add Task and Queue buttons |
+| `/queue` | Lists pending Queue tasks so you can start one immediately |
 | `/help` | Shows task-input examples |
 | `/add ...` | Creates an unplanned task draft |
 | `/today` | Generates today's report |
@@ -199,7 +202,7 @@ Opening the resulting `workers.dev` URL should return a health response similar 
 {
   "ok": true,
   "service": "PulseTask Telegram Worker",
-  "version": "2.1-telegram-drafts"
+  "version": "2.2-queue-picker"
 }
 ```
 
@@ -268,11 +271,18 @@ PulseTask creates and maintains these tabs:
 
 Static tasks use references such as `S12`. Dynamic tasks use references such as `D20260702-R12-V1` or Telegram-generated IDs.
 
+The main schedule sheet also exposes the Telegram Queue at `N2:S`. See [`docs/GOOGLE_SHEETS_SCHEMA.md`](docs/GOOGLE_SHEETS_SCHEMA.md) for its columns and lifecycle.
+
 ### Dynamic task lifecycle
 
 ```mermaid
 stateDiagram-v2
     [*] --> Active
+    Active --> Started: Start or Queue selection
+    Started --> Paused: Pause
+    Paused --> Started: Start
+    Started --> Completed: Done
+    Paused --> Completed: Done
     Active --> Completed: Done
     Active --> Skipped: Skip
     Active --> Superseded: Later or Reschedule again
@@ -319,17 +329,19 @@ Run the non-destructive internal checks from Apps Script:
 runPulseTaskTests()
 ```
 
-They cover time parsing, normal and cross-midnight durations, task references, and free-slot detection.
+They cover time parsing, normal and cross-midnight durations, task references, open task states, stable Telegram references, and free-slot detection.
 
 Recommended end-to-end checks:
 
 1. Run `initializePulseTask()`.
 2. Run `runPulseTaskTests()` and `testTelegram()`.
 3. Deploy both Apps Script and the Worker.
-4. Send `/start`, press **Add Task**, and confirm a draft.
-5. Run `testNextUpcomingReminder()` or send `/test`.
-6. Verify actions in `Action_Log` and energy in `Mood_Log`.
-7. Send `/today`, `/week`, and `/heatmap`.
+4. Send `/start`, press **Add Task**, and confirm a draft with **Add**.
+5. Press **Queue**, select the new task, and verify that it starts and disappears from the Queue.
+6. Pause, resume, and complete the selected task.
+7. Run `testNextUpcomingReminder()` or send `/test`.
+8. Verify actions in `Action_Log` and energy in `Mood_Log`.
+9. Send `/today`, `/week`, and `/heatmap`.
 
 ## Security
 
@@ -347,7 +359,7 @@ See [`SECURITY.md`](SECURITY.md) and [`docs/SECURITY_GUIDE.md`](docs/SECURITY_GU
 
 ## Troubleshooting
 
-### The Add Task button is missing
+### The Add Task or Queue button is missing
 
 Send `/start` once after deploying the Worker. Telegram then installs the persistent reply keyboard.
 
