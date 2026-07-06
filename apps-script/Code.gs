@@ -26,6 +26,10 @@ const CONFIG = {
   MAX_CATEGORY_LENGTH: 80,
   MAX_TASK_LENGTH: 1000,
 
+  // Telegram inbox on the main Time/Plan sheet (starts at N2)
+  TELEGRAM_QUEUE_START_ROW: 2,
+  TELEGRAM_QUEUE_START_COLUMN: 14,
+
   // Reminder configuration
   REMINDER_MINUTES_BEFORE: 60,
   REMINDER_WINDOW_MINUTES: 5,
@@ -946,7 +950,7 @@ function createTelegramDynamicTask(draft, startImmediately) {
   const startTime = draft.start || formatTime(now);
   const finishTime = draft.finish || formatTime(new Date(now.getTime() + CONFIG.DEFAULT_TASK_DURATION_MINUTES * 60000));
   const durationMinutes = calculateDurationMinutes(startTime, finishTime);
-  const taskId = generateTelegramTaskId(dateKey, startTime);
+  const taskId = generateTelegramTaskId(dateKey, startTime, draft.draftId);
 
   const item = {
     dynamicId: taskId,
@@ -973,7 +977,10 @@ function createTelegramDynamicTask(draft, startImmediately) {
     plannedMinutes: durationMinutes
   };
 
+  // Validate/create the visible inbox before committing the generated record.
+  ensureTelegramQueueSection_();
   appendDynamicScheduleRow(item);
+  appendTelegramQueueItem_(item, `D${taskId}`);
 
   if (startImmediately) {
     const taskInfo = {
@@ -1001,10 +1008,125 @@ function createTelegramDynamicTask(draft, startImmediately) {
   return `D${taskId}`;
 }
 
-function generateTelegramTaskId(dateKey, startTime) {
+/**
+ * Creates the Telegram task inbox at N2 on the main schedule sheet.
+ * Existing queue rows are preserved. Conflicting values are never overwritten.
+ */
+function ensureTelegramQueueSection_() {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName(CONFIG.SHEET_NAME);
+
+  if (!sheet) throw new Error(`Sheet not found: ${CONFIG.SHEET_NAME}`);
+
+  const startRow = CONFIG.TELEGRAM_QUEUE_START_ROW;
+  const startColumn = CONFIG.TELEGRAM_QUEUE_START_COLUMN;
+  const headers = [
+    'Added At',
+    'Category',
+    'Task',
+    'Duration',
+    'Suggested Slot',
+    'Task Ref'
+  ];
+  const requiredLastColumn = startColumn + headers.length - 1;
+
+  if (sheet.getMaxColumns() < requiredLastColumn) {
+    sheet.insertColumnsAfter(
+      sheet.getMaxColumns(),
+      requiredLastColumn - sheet.getMaxColumns()
+    );
+  }
+
+  const titleCell = sheet.getRange(startRow, startColumn);
+  const currentTitle = cleanCell(titleCell.getDisplayValue());
+  if (currentTitle && currentTitle !== 'Queue') {
+    throw new Error('Cannot create Queue: cell N2 already contains other data.');
+  }
+
+  const headerRange = sheet.getRange(startRow + 1, startColumn, 1, headers.length);
+  const currentHeaders = headerRange.getDisplayValues()[0].map(cleanCell);
+  const conflictingHeader = currentHeaders.find((value, index) => value && value !== headers[index]);
+  if (conflictingHeader) {
+    throw new Error('Cannot create Queue: cells N3:S3 already contain other data.');
+  }
+
+  titleCell
+    .setValue('Queue')
+    .setFontWeight('bold')
+    .setFontSize(12)
+    .setFontColor('#ffffff')
+    .setBackground('#3c4043');
+
+  sheet
+    .getRange(startRow, startColumn, 1, headers.length)
+    .setBackground('#3c4043');
+
+  headerRange
+    .setValues([headers])
+    .setFontWeight('bold')
+    .setFontColor('#ffffff')
+    .setBackground('#5f6368')
+    .setHorizontalAlignment('center');
+
+  sheet.setColumnWidth(startColumn, 145);
+  sheet.setColumnWidth(startColumn + 1, 120);
+  sheet.setColumnWidth(startColumn + 2, 320);
+  sheet.setColumnWidth(startColumn + 3, 90);
+  sheet.setColumnWidth(startColumn + 4, 165);
+  sheet.setColumnWidth(startColumn + 5, 190);
+
+  return sheet;
+}
+
+/** Appends one confirmed Telegram task to the main-sheet Queue. */
+function appendTelegramQueueItem_(item, taskRef) {
+  const sheet = ensureTelegramQueueSection_();
+  const startRow = CONFIG.TELEGRAM_QUEUE_START_ROW;
+  const startColumn = CONFIG.TELEGRAM_QUEUE_START_COLUMN;
+  const columnCount = 6;
+  const firstDataRow = startRow + 2;
+  const lastSheetRow = Math.max(firstDataRow - 1, sheet.getLastRow());
+  const existingRows = lastSheetRow < firstDataRow
+    ? []
+    : sheet
+      .getRange(firstDataRow, startColumn, lastSheetRow - firstDataRow + 1, columnCount)
+      .getDisplayValues();
+
+  // The task reference makes retries idempotent for the visible Queue.
+  if (existingRows.some(row => cleanCell(row[5]) === cleanCell(taskRef))) return;
+
+  let targetRow = firstDataRow;
+  existingRows.forEach((row, index) => {
+    if (row.some(value => cleanCell(value))) targetRow = firstDataRow + index + 1;
+  });
+
+  const suggestedSlot = `${item.scheduleDate} ${item.newStart}-${item.newFinish}`;
+  const values = [[
+    item.createdAt || Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
+    item.state || 'Uncategorized',
+    item.task || '',
+    formatMinutes(Number(item.plannedMinutes || 0)),
+    suggestedSlot,
+    taskRef
+  ]];
+
+  sheet
+    .getRange(targetRow, startColumn, 1, columnCount)
+    .setValues(values)
+    .setVerticalAlignment('top')
+    .setWrap(true)
+    .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+}
+
+function generateTelegramTaskId(dateKey, startTime, stableSeed) {
   const normalizedDate = String(dateKey || '').replace(/-/g, '');
   const normalizedStart = String(startTime || '').replace(/:/g, '');
-  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+  const stableSuffix = String(stableSeed || '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(-6)
+    .toUpperCase();
+  const suffix = stableSuffix || Math.random().toString(36).slice(2, 8).toUpperCase();
   return `${normalizedDate}-${normalizedStart}-TG${suffix}`;
 }
 
@@ -2746,6 +2868,10 @@ function runPulseTaskTests() {
   assert_('cross-midnight duration', calculateDurationMinutes('23:30', '00:30') === 60);
   assert_('static task reference', /^(S\d+)$/.test('S12'));
   assert_('dynamic task reference', /^(D[A-Za-z0-9-]+)$/.test('D20260702-R12-V1'));
+  assert_(
+    'stable Telegram task reference',
+    generateTelegramTaskId('2026-07-02', '09:30', 'TG20260702093000ABC123') === '20260702-0930-TGABC123'
+  );
 
   const start = combineDateKeyWithTime('2026-07-02', '09:00');
   const end = combineDateKeyWithTime('2026-07-02', '18:00');
@@ -2781,6 +2907,7 @@ function initializePulseTask() {
   try {
     validatePulseTaskConfiguration_();
     ensureGeneratedSheetsExist_();
+    ensureTelegramQueueSection_();
     installProjectTriggers();
     buildEnergyHeatmapSheet(7);
 

@@ -20,6 +20,25 @@ Friday
 
 `State` is the task category, such as `Health/GYM`, `Deep Work`, or `Personal`.
 
+### Telegram Queue
+
+The main schedule sheet also contains a lightweight inbox beginning at `N2`.
+Only confirmed Telegram tasks are appended to it; cancelled drafts are not.
+The normal `Dynamic_Schedule` record is still created, so existing scheduling,
+tracking, and **Add & Start** behavior remain unchanged.
+
+| Column | Header | Meaning |
+|---|---|---|
+| N | Added At | Telegram confirmation timestamp |
+| O | Category | Detected or supplied category |
+| P | Task | Task description |
+| Q | Duration | Planned duration |
+| R | Suggested Slot | Slot selected by the existing scheduler |
+| S | Task Ref | Reference used to prevent duplicate Queue rows |
+
+Move or copy Queue items into the weekday plan when you decide where they
+belong, then remove the Queue row manually.
+
 ## Action_Log
 
 | Column | Meaning |
