@@ -58,7 +58,7 @@ Send `/start` once to install the persistent **➕ Add Task** and **📥 Queue**
 
 After a successful action, the draft card is deleted to keep the chat clean. If saving fails, it stays visible so the action can be retried.
 
-Tasks saved with **Add** are placed in the Queue with status `Queued`, so they do not reserve time or push later slot suggestions forward. Press **📥 Queue** (or send `/queue`) to see up to 12 pending tasks, then select the one you want to do now. PulseTask creates a one-hour block in the **Active Sessions** area of the same `Time/Plan` sheet, starts its timer, and removes it from Queue. After one hour Telegram asks whether the task is **Done** or should **Continue 1h**. Continuing extends the sheet's Finish time and schedules the next hourly check-in. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
+Tasks saved with **Add** are placed in the Queue with status `Queued`, so they do not reserve time or push later slot suggestions forward. Press **📥 Queue** (or send `/queue`) to see every pending Queue task, then select the one you want to do now. PulseTask creates a one-hour block in the **Active Sessions** area of the same `Time/Plan` sheet, starts its timer, and removes it from Queue. After one hour Telegram asks whether the task is **Done** or should **Continue 1h**. Continuing extends the sheet's Finish time and schedules the next hourly check-in. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
 
 Plain text also creates a task draft. Supported input formats include:
 

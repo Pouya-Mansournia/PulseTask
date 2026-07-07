@@ -1174,7 +1174,7 @@ function getTelegramQueueItems_() {
 
   return {
     ok: true,
-    items: items.slice(0, 12).map(item => ({
+    items: items.map(item => ({
       taskRef: item.taskRef,
       category: item.category,
       task: item.task,
