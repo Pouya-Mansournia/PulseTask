@@ -105,6 +105,38 @@ flowchart TB
 | Google Apps Script | Schedule logic, task state, finance state, reports, triggers, Google Sheets writes |
 | Google Sheets | Main plan, queue, active sessions, dynamic schedule, logs, reports |
 
+### Technology architecture
+
+| Technology | Where it lives | Why it is used |
+|---|---|---|
+| Telegram Bot API | External chat interface | Low-friction personal UI with persistent buttons and inline actions |
+| Cloudflare Worker | `cloudflare-worker/src/index.js` | Public webhook endpoint, fast callback acknowledgement, chat authorization, and lightweight session routing |
+| Google Apps Script Web App | `apps-script/Code.gs` | Trusted automation layer with direct access to Google Sheets, triggers, and UrlFetchApp |
+| Google Sheets | User-owned spreadsheet | Human-readable storage for schedule, Queue, Active Sessions, logs, reports, and finance records |
+| Apps Script Triggers | Installed by `initializePulseTask()` | Reminder polling, weekly reports, and one-hour Queue follow-ups |
+| Cloudflare Secrets | Worker runtime | Stores Telegram token, chat ID, Apps Script URL, and shared API secret |
+| Apps Script Properties | Google runtime | Stores the same bot credentials plus schedule and finance configuration |
+
+The architecture intentionally keeps persistence inside the user-owned Google Sheet. The Worker stays stateless except for short-lived finance wizard state, so it can be redeployed without migrating data.
+
+### Communication model
+
+| Flow | Transport | Authentication | Result |
+|---|---|---|---|
+| Telegram -> Worker | Telegram webhook POST | Telegram bot token at webhook registration time | Worker receives messages, commands, and callback queries |
+| Worker -> Telegram | Telegram Bot API HTTPS calls | `TELEGRAM_BOT_TOKEN` in Cloudflare Secrets | Bot sends messages, inline keyboards, reports, and persistent keyboard updates |
+| Worker -> Apps Script | HTTPS POST to `APPS_SCRIPT_URL` | `WORKER_API_SECRET` in every JSON payload | Apps Script mutates Sheets or returns data for Queue, Finance, and reports |
+| Apps Script -> Telegram | Telegram Bot API HTTPS calls | `TELEGRAM_BOT_TOKEN` in Apps Script Properties | Time-based reminders and scheduled reports are sent without a user webhook event |
+| Apps Script -> Google Sheets | SpreadsheetApp APIs | Script executes as the sheet owner | Logs, dynamic tasks, Queue rows, Active Sessions, reports, and finance rows are written |
+
+Important communication rules:
+
+- Telegram webhook updates should go to Cloudflare, not Apps Script.
+- Apps Script `/exec` is public by deployment design, but every POST is rejected unless the shared secret matches.
+- The Worker ignores messages from any chat except `TELEGRAM_CHAT_ID`.
+- Inline callback queries are acknowledged quickly by the Worker, then heavier work is delegated to Apps Script.
+- Time-based jobs are initiated inside Apps Script triggers, so reminders and weekly reports do not depend on the Worker receiving a chat message.
+
 The Telegram webhook points to Cloudflare, not directly to Apps Script. Cloudflare signs every Apps Script request with `WORKER_API_SECRET`.
 
 ## Telegram UX
