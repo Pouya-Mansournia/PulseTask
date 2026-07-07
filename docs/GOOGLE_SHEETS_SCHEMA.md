@@ -47,9 +47,11 @@ Rows can still be removed manually when needed.
 
 The same main sheet contains date-specific execution blocks beginning at `R1`.
 Selecting a Queue task writes a one-hour session here without overwriting the
-recurring weekday plan. Telegram checks in after one hour; **Continue 1h**
-extends the Finish value and schedules another check-in, while **Done** records
-the actual finish time and closes the session.
+recurring weekday plan. Telegram immediately shows **Done / Continue 1h**
+controls, and `/active` can reopen them for any running Queue task. Telegram
+also checks in after one hour; **Continue 1h** extends the Finish value and
+schedules another check-in, while **Done** records the actual finish time and
+closes the session.
 
 | Column | Header | Meaning |
 |---|---|---|
@@ -89,3 +91,28 @@ Stores one row per generated weekly report.
 ## Energy_Heatmap
 
 Rows are dates. Columns are hourly buckets from 00:00 to 23:00. Values are average energy ratings.
+
+## Finance_Log
+
+Stores personal finance transactions created from Telegram. Use **💰 Finance**,
+`/finance`, `/expense`, or `/income` to create drafts. Expenses reduce the
+balance and income increases it. The optional Apps Script property
+`FINANCE_STARTING_BALANCE` sets the opening balance; otherwise the balance
+starts at zero.
+
+| Column | Meaning |
+|---|---|
+| Logged At | Local timestamp |
+| Date | Local date |
+| Type | `income` or `expense` |
+| Amount | Positive transaction amount |
+| Signed Amount | Positive for income, negative for expense |
+| Category | User supplied category such as Food, Loan, Salary, Rent |
+| Note | Optional description |
+| Source | Usually Telegram |
+| Telegram Chat ID | Source chat |
+| Balance After | Running balance after this transaction |
+| Transaction ID | Stable finance log reference |
+
+Weekly finance reports summarize income, expenses, net change, current balance,
+and expense totals by category.

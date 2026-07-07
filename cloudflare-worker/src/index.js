@@ -31,7 +31,7 @@ export default {
       return Response.json({
         ok: true,
         service: "PulseTask Telegram Worker",
-        version: "2.3-hourly-check-ins",
+        version: "2.5-finance-log",
       });
     }
 
@@ -85,6 +85,13 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
     return;
   }
 
+  if (data === "finance:add_expense" || data === "finance:add_income") {
+    const transactionType = data.endsWith("income") ? "income" : "expense";
+    await answerCallbackQuery(env, callbackId, transactionType === "income" ? "Income entry opened." : "Expense entry opened.");
+    await sendFinanceEntryPrompt(env, chatId, transactionType);
+    return;
+  }
+
   const parsed = parseCallbackData(data);
 
   if (!parsed.ok) {
@@ -100,6 +107,7 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
       draftId: parsed.draftId,
       taskRef: parsed.taskRef,
       energyValue: parsed.energyValue,
+      transactionType: parsed.transactionType,
       callbackId: callbackId,
       telegramChatId: chatId,
       createdAt: new Date().toISOString(),
@@ -110,7 +118,7 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
 async function processCallbackAction(env, parsed, chatId, messageId, actionData) {
   const result = await sendToAppsScript(env, actionData);
 
-  if ((parsed.draftId || parsed.queueTask || parsed.queueFollowUp) && messageId) {
+  if ((parsed.draftId || parsed.queueTask || parsed.queueFollowUp || parsed.financeDraft) && messageId) {
     try {
       await callTelegramApi(env, "deleteMessage", {
         chat_id: chatId,
@@ -122,7 +130,7 @@ async function processCallbackAction(env, parsed, chatId, messageId, actionData)
   }
 
   if (parsed.queueTask && result?.task) {
-    await sendTelegramMessage(
+    await sendTelegramMessageWithKeyboard(
       env,
       chatId,
       [
@@ -130,8 +138,9 @@ async function processCallbackAction(env, parsed, chatId, messageId, actionData)
         "",
         result.task,
         result.start && result.finish ? `🕐 ${result.start}–${result.finish}` : "",
-        "I’ll check in again in one hour.",
-      ].filter(Boolean).join("\n")
+        "Tap Done whenever you finish, or I’ll check in again in one hour.",
+      ].filter(Boolean).join("\n"),
+      getActiveTaskKeyboard(result.taskRef || parsed.taskRef)
     );
   }
 
@@ -140,6 +149,25 @@ async function processCallbackAction(env, parsed, chatId, messageId, actionData)
       ? [`✅ Completed`, "", result.task]
       : [`➕ Continued for one more hour`, "", result.task, `Planned until ${result.finish}`];
     await sendTelegramMessage(env, chatId, message.join("\n"));
+  }
+
+  if (parsed.financeDraft && result?.message) {
+    if (parsed.action === "confirm_finance_draft") {
+      await sendTelegramMessage(env, chatId, [
+        result.type === "income" ? "💵 Income saved" : "💸 Expense saved",
+        "",
+        `Amount: ${formatMoneyText(result.amount)}`,
+        `Category: ${result.category || "Uncategorized"}`,
+        result.note ? `Note: ${result.note}` : "",
+        `Balance: ${formatMoneyText(result.balance)}`,
+      ].filter(Boolean).join("\n"));
+    } else {
+      await sendTelegramMessage(env, chatId, "❌ Finance draft cancelled.");
+    }
+  }
+
+  if (parsed.financeReport && result?.message) {
+    await sendTelegramMessage(env, chatId, result.message);
   }
 
   return result;
@@ -269,6 +297,36 @@ function parseCallbackData(data) {
     }
   }
 
+  if (action === "financebalance" || action === "financeweek") {
+    return {
+      ok: true,
+      action: action === "financebalance" ? "finance_balance" : "finance_week_report",
+      draftId: null,
+      taskRef: null,
+      energyValue: null,
+      financeReport: true,
+      confirmation: action === "financebalance" ? "Preparing finance balance..." : "Preparing finance report...",
+    };
+  }
+
+  if (["finconfirm", "fincancel"].includes(action)) {
+    const draftId = String(parts[1] || "").trim();
+
+    if (!draftId) {
+      return { ok: false, message: "Invalid finance draft reference." };
+    }
+
+    return {
+      ok: true,
+      action: action === "finconfirm" ? "confirm_finance_draft" : "cancel_finance_draft",
+      draftId: draftId,
+      taskRef: null,
+      energyValue: null,
+      financeDraft: true,
+      confirmation: action === "finconfirm" ? "Saving transaction..." : "Cancelling finance draft...",
+    };
+  }
+
   if (["taskconfirm", "taskstart", "taskcancel"].includes(action)) {
     const draftId = String(parts[1] || "").trim();
 
@@ -325,9 +383,11 @@ async function handleIncomingMessage(message, env, ctx) {
         "Hello 👋",
         "",
         "PulseTask is online.",
-        "Use the buttons below to add a task or pick something from your Queue.",
+        "Use the buttons below to add a task, pick something from your Queue, or log finance.",
         "",
         "/queue — Pick a pending task to start now",
+        "/active — Show running Queue tasks",
+        "/finance — Open finance tools",
         "/today — Generate today’s report",
         "/week — Generate the weekly report",
         "/heatmap — Update the energy heatmap",
@@ -348,9 +408,31 @@ async function handleIncomingMessage(message, env, ctx) {
       "/add 18:30-20:00 | PulseTask | Improve Telegram integration",
       "/add 90m | Research | Read robotics paper",
       "/queue to pick a pending task and start it now",
+      "/active to mark a running Queue task as Done early",
+      "/expense 250000 | Food | groceries",
+      "/income 5000000 | Salary | July payment",
       "",
       "You can also send plain text directly and I will suggest the next available free slot automatically.",
     ].join("\n"));
+    return;
+  }
+
+  const financeReplyType = getFinanceReplyType(message.reply_to_message?.text);
+  if (financeReplyType && rawText) {
+    await prepareFinanceDraft(env, chatId, rawText, financeReplyType);
+    return;
+  }
+
+  if (text.startsWith("/expense") || text.startsWith("/income")) {
+    const transactionType = text.startsWith("/income") ? "income" : "expense";
+    const input = rawText.replace(/^\/(?:expense|income)\s*/i, "").trim();
+
+    if (!input) {
+      await sendFinanceEntryPrompt(env, chatId, transactionType);
+      return;
+    }
+
+    await prepareFinanceDraft(env, chatId, input, transactionType);
     return;
   }
 
@@ -390,6 +472,26 @@ async function handleIncomingMessage(message, env, ctx) {
 
   if (rawText === "📥 Queue" || text.startsWith("/queue")) {
     await sendQueueList(env, chatId);
+    return;
+  }
+
+  if (rawText === "▶️ Active" || text.startsWith("/active")) {
+    await sendActiveQueueList(env, chatId);
+    return;
+  }
+
+  if (rawText === "💰 Finance" || text.startsWith("/finance")) {
+    await sendFinanceMenu(env, chatId);
+    return;
+  }
+
+  if (rawText === "💸 Add Expense") {
+    await sendFinanceEntryPrompt(env, chatId, "expense");
+    return;
+  }
+
+  if (rawText === "💵 Add Income") {
+    await sendFinanceEntryPrompt(env, chatId, "income");
     return;
   }
 
@@ -452,7 +554,10 @@ async function handleIncomingMessage(message, env, ctx) {
 
 function getMainMenuKeyboard(inputPlaceholder) {
   return {
-    keyboard: [[{ text: "➕ Add Task" }, { text: "📥 Queue" }]],
+    keyboard: [
+      [{ text: "➕ Add Task" }, { text: "📥 Queue" }],
+      [{ text: "▶️ Active" }, { text: "💰 Finance" }],
+    ],
     resize_keyboard: true,
     is_persistent: true,
     input_field_placeholder: inputPlaceholder || "Choose an action...",
@@ -487,6 +592,152 @@ async function sendQueueList(env, chatId) {
     `📥 Queue\n\nWhich task do you feel like doing now?${footer}`,
     { inline_keyboard: buttons }
   );
+}
+
+async function sendActiveQueueList(env, chatId) {
+  const result = await sendToAppsScript(env, {
+    action: "list_active_queue_tasks",
+    telegramChatId: chatId,
+    createdAt: new Date().toISOString(),
+  });
+  const items = Array.isArray(result?.items) ? result.items : [];
+
+  if (items.length === 0) {
+    await sendTelegramMessage(env, chatId, "📭 No Queue task is currently running.");
+    return;
+  }
+
+  if (items.length === 1) {
+    const item = items[0];
+    await sendTelegramMessageWithKeyboard(
+      env,
+      chatId,
+      [
+        "▶️ Active Queue Task",
+        "",
+        item.task,
+        item.start && item.finish ? `🕐 ${item.start}–${item.finish}` : "",
+      ].filter(Boolean).join("\n"),
+      getActiveTaskKeyboard(item.taskRef)
+    );
+    return;
+  }
+
+  const lines = ["▶️ Active Queue Tasks", ""];
+  const buttons = [];
+
+  items.forEach((item, index) => {
+    lines.push(`${index + 1}. ${item.task}`);
+    if (item.start && item.finish) lines.push(`   🕐 ${item.start}–${item.finish}`);
+    buttons.push([
+      { text: `✅ Done ${index + 1}`, callback_data: `qdone:${item.taskRef}` },
+      { text: `➕ Continue ${index + 1}`, callback_data: `qcontinue:${item.taskRef}` },
+    ]);
+  });
+
+  await sendTelegramMessageWithKeyboard(
+    env,
+    chatId,
+    lines.join("\n"),
+    { inline_keyboard: buttons }
+  );
+}
+
+function getActiveTaskKeyboard(taskRef) {
+  return {
+    inline_keyboard: [[
+      { text: "✅ Done", callback_data: `qdone:${taskRef}` },
+      { text: "➕ Continue 1h", callback_data: `qcontinue:${taskRef}` },
+    ]],
+  };
+}
+
+async function sendFinanceMenu(env, chatId) {
+  await sendTelegramMessageWithKeyboard(
+    env,
+    chatId,
+    [
+      "💰 Finance",
+      "",
+      "Log income and expenses without leaving Telegram.",
+      "",
+      "Format:",
+      "AMOUNT | CATEGORY | NOTE",
+      "",
+      "Examples:",
+      "250000 | Food | groceries",
+      "5000000 | Salary | July payment",
+    ].join("\n"),
+    {
+      inline_keyboard: [
+        [
+          { text: "💸 Add Expense", callback_data: "finance:add_expense" },
+          { text: "💵 Add Income", callback_data: "finance:add_income" },
+        ],
+        [
+          { text: "🏦 Balance", callback_data: "financebalance" },
+          { text: "📊 Week", callback_data: "financeweek" },
+        ],
+      ],
+    }
+  );
+}
+
+async function sendFinanceEntryPrompt(env, chatId, transactionType) {
+  const isIncome = transactionType === "income";
+  await callTelegramApi(env, "sendMessage", {
+    chat_id: chatId,
+    text: [
+      isIncome ? "💵 Income Entry" : "💸 Expense Entry",
+      "",
+      "Reply with:",
+      "AMOUNT | CATEGORY | NOTE",
+      "",
+      isIncome
+        ? "Example: 5000000 | Salary | July payment"
+        : "Example: 250000 | Food | groceries",
+    ].join("\n"),
+    reply_markup: {
+      force_reply: true,
+      selective: true,
+      input_field_placeholder: isIncome
+        ? "5000000 | Salary | July payment"
+        : "250000 | Food | groceries",
+    },
+  });
+}
+
+function getFinanceReplyType(text) {
+  const value = String(text || "");
+  if (value.includes("💵 Income Entry")) return "income";
+  if (value.includes("💸 Expense Entry")) return "expense";
+  return "";
+}
+
+async function prepareFinanceDraft(env, chatId, financeInput, transactionType) {
+  const result = await sendToAppsScript(env, {
+    action: "prepare_finance_draft",
+    transactionType: transactionType,
+    financeInput: financeInput,
+    telegramChatId: chatId,
+    createdAt: new Date().toISOString(),
+  });
+
+  if (result?.preview && result?.draftId) {
+    await sendTelegramMessageWithKeyboard(env, chatId, result.preview, {
+      inline_keyboard: [
+        [
+          { text: "✅ Save", callback_data: `finconfirm:${result.draftId}` },
+          { text: "❌ Cancel", callback_data: `fincancel:${result.draftId}` },
+        ],
+      ],
+    });
+  }
+}
+
+function formatMoneyText(value) {
+  const amount = Number(value || 0);
+  return amount.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
 function formatQueueButtonLabel(item) {

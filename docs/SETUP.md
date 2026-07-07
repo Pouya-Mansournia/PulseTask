@@ -163,6 +163,7 @@ Expected triggers:
 
 ```text
 sendNext4HoursPlanToTelegram — every four hours
+sendWeeklyFinanceReport — Friday around 23:30
 sendWeeklyWellbeingReport — Friday around 23:45
 ```
 

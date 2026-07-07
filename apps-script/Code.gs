@@ -16,6 +16,7 @@ const CONFIG = {
   ENERGY_HEATMAP_SHEET_NAME: 'Energy_Heatmap',
   REMINDER_LOG_SHEET_NAME: 'Reminder_Log',
   DYNAMIC_SCHEDULE_SHEET_NAME: 'Dynamic_Schedule',
+  FINANCE_LOG_SHEET_NAME: 'Finance_Log',
 
   // Time configuration
   TIMEZONE: getScriptPropertyOrFallback_('TIMEZONE', 'Asia/Tehran'),
@@ -25,6 +26,11 @@ const CONFIG = {
   DRAFT_EXPIRY_MINUTES: 15,
   MAX_CATEGORY_LENGTH: 80,
   MAX_TASK_LENGTH: 1000,
+
+  // Personal finance configuration
+  FINANCE_DRAFT_EXPIRY_MINUTES: 15,
+  FINANCE_DEFAULT_BALANCE: Number(getScriptPropertyOrFallback_('FINANCE_STARTING_BALANCE', '0')),
+  MAX_FINANCE_NOTE_LENGTH: 500,
 
   // Telegram inbox on the main Time/Plan sheet (starts at L1)
   TELEGRAM_QUEUE_START_ROW: 1,
@@ -134,8 +140,30 @@ function doPost(e) {
       const result = cancelTaskDraft(payload.draftId, payload.telegramChatId || payload.chatId);
       return createJsonResponse(result);
 
+    } else if (action === 'prepare_finance_draft') {
+      const result = createFinanceDraft(payload);
+      return createJsonResponse(result);
+
+    } else if (action === 'confirm_finance_draft') {
+      const result = confirmFinanceDraft(payload.draftId, payload.telegramChatId || payload.chatId);
+      return createJsonResponse(result);
+
+    } else if (action === 'cancel_finance_draft') {
+      const result = cancelFinanceDraft(payload.draftId, payload.telegramChatId || payload.chatId);
+      return createJsonResponse(result);
+
+    } else if (action === 'finance_balance') {
+      return createJsonResponse(getFinanceBalanceSummary_());
+
+    } else if (action === 'finance_week_report') {
+      const report = buildFinanceReportForLastDays_(7);
+      return createJsonResponse({ ok: true, message: report.message });
+
     } else if (action === 'list_queue') {
       return createJsonResponse(getTelegramQueueItems_());
+
+    } else if (action === 'list_active_queue_tasks') {
+      return createJsonResponse(getActiveQueueTasks_());
 
     } else if (action === 'start_queue_task') {
       validateTaskRef(taskRef);
@@ -964,6 +992,322 @@ function cancelTaskDraft(draftId, chatId) {
   return { ok: true, message: 'Draft cancelled.' };
 }
 
+function createFinanceDraft(payload) {
+  const chatId = cleanCell(payload.telegramChatId || payload.chatId || '');
+  if (!chatId) {
+    throw new Error('Telegram chat ID is missing.');
+  }
+
+  const type = normalizeFinanceType_(payload.transactionType || payload.type || '');
+  const rawInput = cleanCell(payload.financeInput || payload.text || '');
+  if (!rawInput) {
+    throw new Error('Finance input is empty.');
+  }
+
+  const draft = parseFinanceInputToDraft_(rawInput, type, chatId);
+  draft.createdAt = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+
+  const draftId = generateFinanceDraftId_();
+  draft.draftId = draftId;
+
+  CacheService.getScriptCache().put(
+    draftId,
+    JSON.stringify(draft),
+    Math.max(1, Number(CONFIG.FINANCE_DRAFT_EXPIRY_MINUTES || 15) * 60)
+  );
+
+  return {
+    ok: true,
+    draftId: draftId,
+    preview: buildFinanceDraftPreview_(draft)
+  };
+}
+
+function confirmFinanceDraft(draftId, chatId) {
+  const cached = CacheService.getScriptCache().get(draftId);
+  if (!cached) {
+    return { ok: false, error: 'This finance draft is no longer available. Please enter it again.' };
+  }
+
+  const draft = JSON.parse(cached);
+  if (chatId && draft.telegramChatId && String(draft.telegramChatId) !== String(chatId)) {
+    return { ok: false, error: 'This finance draft belongs to a different chat.' };
+  }
+
+  const saved = appendFinanceLogRow_(draft);
+  CacheService.getScriptCache().remove(draftId);
+
+  return {
+    ok: true,
+    draftId: draftId,
+    transactionId: saved.transactionId,
+    type: draft.type,
+    amount: draft.amount,
+    category: draft.category,
+    note: draft.note,
+    balance: saved.balanceAfter,
+    message: `${draft.type === 'income' ? 'Income' : 'Expense'} saved.`
+  };
+}
+
+function cancelFinanceDraft(draftId, chatId) {
+  const cached = CacheService.getScriptCache().get(draftId);
+  if (!cached) {
+    return { ok: false, error: 'This finance draft is no longer available.' };
+  }
+
+  const draft = JSON.parse(cached);
+  if (chatId && draft.telegramChatId && String(draft.telegramChatId) !== String(chatId)) {
+    return { ok: false, error: 'This finance draft belongs to a different chat.' };
+  }
+
+  CacheService.getScriptCache().remove(draftId);
+  return { ok: true, message: 'Finance draft cancelled.' };
+}
+
+function parseFinanceInputToDraft_(rawInput, type, chatId) {
+  const input = cleanCell(rawInput);
+  const parts = input.includes('|')
+    ? input.split('|').map(part => cleanCell(part)).filter(Boolean)
+    : input.split(/\s+/).map(part => cleanCell(part)).filter(Boolean);
+
+  if (parts.length < 2) {
+    throw new Error('Usage: AMOUNT | CATEGORY | NOTE. Example: 250000 | Food | groceries');
+  }
+
+  const amount = parseMoneyAmount_(parts[0]);
+  if (amount <= 0) {
+    throw new Error('Amount must be greater than zero.');
+  }
+
+  const category = normalizeFinanceCategory_(parts[1]);
+  const note = input.includes('|')
+    ? cleanCell(parts.slice(2).join(' | '))
+    : cleanCell(parts.slice(2).join(' '));
+
+  if (note.length > CONFIG.MAX_FINANCE_NOTE_LENGTH) {
+    throw new Error('Finance note is too long.');
+  }
+
+  return {
+    type: type,
+    amount: amount,
+    category: category,
+    note: note,
+    telegramChatId: chatId,
+    source: 'Telegram'
+  };
+}
+
+function buildFinanceDraftPreview_(draft) {
+  const isIncome = draft.type === 'income';
+  return [
+    isIncome ? '💵 New Income' : '💸 New Expense',
+    '',
+    `💰 Amount: ${formatMoney_(draft.amount)}`,
+    `🏷 Category: ${draft.category}`,
+    draft.note ? `📝 Note: ${draft.note}` : '',
+    '',
+    'Save this transaction?'
+  ].filter(Boolean).join('\n');
+}
+
+function appendFinanceLogRow_(draft) {
+  const sheet = getFinanceLogSheet_();
+  const now = new Date();
+  const dateKey = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+  const signedAmount = draft.type === 'income'
+    ? Number(draft.amount)
+    : -Number(draft.amount);
+  const balanceAfter = calculateFinanceBalance_() + signedAmount;
+  const transactionId = generateFinanceTransactionId_();
+
+  sheet.appendRow([
+    Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
+    dateKey,
+    draft.type,
+    Number(draft.amount),
+    signedAmount,
+    draft.category,
+    draft.note || '',
+    draft.source || 'Telegram',
+    draft.telegramChatId || '',
+    balanceAfter,
+    transactionId
+  ]);
+
+  return { transactionId, balanceAfter };
+}
+
+function getFinanceBalanceSummary_() {
+  const balance = calculateFinanceBalance_();
+  const report = buildFinanceReportForLastDays_(7);
+  return {
+    ok: true,
+    balance: balance,
+    balanceText: formatMoney_(balance),
+    weeklyIncome: report.income,
+    weeklyExpense: report.expense,
+    message: [
+      '💰 Finance Balance',
+      '',
+      `Current balance: ${formatMoney_(balance)}`,
+      '',
+      `Last 7 days income: ${formatMoney_(report.income)}`,
+      `Last 7 days expense: ${formatMoney_(report.expense)}`,
+      `Net: ${formatMoney_(report.net)}`
+    ].join('\n')
+  };
+}
+
+function buildFinanceReportForLastDays_(days) {
+  const range = getLastNDaysRange(days || 7);
+  const rows = getFinanceLogRows_().filter(row => isDateInRange(row.date, range.start, range.end));
+  let income = 0;
+  let expense = 0;
+  const categoryTotals = {};
+
+  rows.forEach(row => {
+    if (row.type === 'income') {
+      income += row.amount;
+      return;
+    }
+
+    expense += row.amount;
+    const category = row.category || 'Uncategorized';
+    categoryTotals[category] = (categoryTotals[category] || 0) + row.amount;
+  });
+
+  const categoryLines = Object.keys(categoryTotals)
+    .sort((a, b) => categoryTotals[b] - categoryTotals[a])
+    .map(category => `• ${category}: ${formatMoney_(categoryTotals[category])}`);
+
+  const message = [
+    '💰 Weekly Finance Report',
+    `🗓 ${range.start} to ${range.end}`,
+    '',
+    `💵 Income: ${formatMoney_(income)}`,
+    `💸 Expenses: ${formatMoney_(expense)}`,
+    `📌 Net: ${formatMoney_(income - expense)}`,
+    `🏦 Balance: ${formatMoney_(calculateFinanceBalance_())}`,
+    '',
+    categoryLines.length ? 'Spending by category:' : 'No expenses logged in this period.',
+    ...categoryLines
+  ].join('\n');
+
+  return {
+    startDate: range.start,
+    endDate: range.end,
+    income,
+    expense,
+    net: income - expense,
+    categoryTotals,
+    message
+  };
+}
+
+function sendWeeklyFinanceReport() {
+  const report = buildFinanceReportForLastDays_(7);
+  sendTelegramMessage(report.message);
+}
+
+function getFinanceLogSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(CONFIG.FINANCE_LOG_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.FINANCE_LOG_SHEET_NAME);
+    createFinanceLogHeader_(sheet);
+  }
+  return sheet;
+}
+
+function createFinanceLogHeader_(sheet) {
+  sheet.clear();
+  sheet.appendRow([
+    'Logged At',
+    'Date',
+    'Type',
+    'Amount',
+    'Signed Amount',
+    'Category',
+    'Note',
+    'Source',
+    'Telegram Chat ID',
+    'Balance After',
+    'Transaction ID'
+  ]);
+  formatHeaderRow(sheet);
+}
+
+function getFinanceLogRows_() {
+  const sheet = getFinanceLogSheet_();
+  if (sheet.getLastRow() < 2) return [];
+
+  return sheet.getDataRange().getDisplayValues().slice(1).map(row => ({
+    loggedAt: cleanCell(row[0]),
+    date: cleanCell(row[1]),
+    type: normalizeFinanceType_(row[2]),
+    amount: Number(String(row[3]).replace(/,/g, '')) || 0,
+    signedAmount: Number(String(row[4]).replace(/,/g, '')) || 0,
+    category: cleanCell(row[5]),
+    note: cleanCell(row[6]),
+    source: cleanCell(row[7]),
+    telegramChatId: cleanCell(row[8]),
+    balanceAfter: Number(String(row[9]).replace(/,/g, '')) || 0,
+    transactionId: cleanCell(row[10])
+  }));
+}
+
+function calculateFinanceBalance_() {
+  return getFinanceLogRows_().reduce(
+    (sum, row) => sum + Number(row.signedAmount || 0),
+    Number(CONFIG.FINANCE_DEFAULT_BALANCE || 0)
+  );
+}
+
+function normalizeFinanceType_(value) {
+  const normalized = cleanCell(value).toLowerCase();
+  if (['income', 'in', 'deposit', 'credit', 'ورودی', 'درآمد'].includes(normalized)) return 'income';
+  if (['expense', 'out', 'withdrawal', 'debit', 'خرج', 'هزینه', 'خروجی'].includes(normalized)) return 'expense';
+  throw new Error('Finance transaction type must be income or expense.');
+}
+
+function normalizeFinanceCategory_(value) {
+  const category = cleanCell(value) || 'Uncategorized';
+  if (category.length > CONFIG.MAX_CATEGORY_LENGTH) {
+    throw new Error('Finance category is too long.');
+  }
+  return category;
+}
+
+function parseMoneyAmount_(value) {
+  const normalized = cleanCell(value)
+    .replace(/[,\s]/g, '')
+    .replace(/[^\d.۰-۹٠-٩]/g, '')
+    .replace(/[۰-۹]/g, digit => '۰۱۲۳۴۵۶۷۸۹'.indexOf(digit))
+    .replace(/[٠-٩]/g, digit => '٠١٢٣٤٥٦٧٨٩'.indexOf(digit));
+  const amount = Number(normalized);
+  if (!Number.isFinite(amount)) return 0;
+  return Math.round(amount * 100) / 100;
+}
+
+function formatMoney_(amount) {
+  const value = Number(amount || 0);
+  return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
+function generateFinanceDraftId_() {
+  const stamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMddHHmmss');
+  const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `FIN${stamp}${suffix}`;
+}
+
+function generateFinanceTransactionId_() {
+  const stamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMddHHmmss');
+  const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `FT${stamp}${suffix}`;
+}
+
 function createTelegramDynamicTask(draft, startImmediately) {
   const now = getNowInConfiguredTimezone();
   const dateKey = draft.date || formatDateKey(now);
@@ -1180,6 +1524,25 @@ function getTelegramQueueItems_() {
       task: item.task,
       duration: item.duration,
       suggestedSlot: item.suggestedSlot
+    })),
+    total: items.length
+  };
+}
+
+/** Returns currently running Telegram Queue tasks for immediate Done/Continue controls. */
+function getActiveQueueTasks_() {
+  const items = getAllDynamicTasks()
+    .filter(item => cleanCell(item.status) === 'Started')
+    .reverse();
+
+  return {
+    ok: true,
+    items: items.map(item => ({
+      taskRef: `D${item.dynamicId}`,
+      category: item.state || 'Uncategorized',
+      task: item.task || '',
+      start: item.newStart || '',
+      finish: item.newFinish || ''
     })),
     total: items.length
   };
@@ -2840,6 +3203,14 @@ function installProjectTriggers() {
     .nearMinute(45)
     .create();
 
+  ScriptApp
+    .newTrigger('sendWeeklyFinanceReport')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.FRIDAY)
+    .atHour(23)
+    .nearMinute(30)
+    .create();
+
   Logger.log('Project triggers installed successfully.');
 }
 
@@ -2865,6 +3236,7 @@ function fullResetSystem() {
     '✅ Dynamic_Schedule was recreated',
     '✅ Weekly_Report was recreated',
     '✅ Energy_Heatmap was recreated',
+    '✅ Finance_Log was recreated',
     '✅ Schedule colors were reset',
     '',
     'Your main schedule data was not deleted.'
@@ -2879,7 +3251,8 @@ function resetGeneratedSheets() {
     CONFIG.REMINDER_LOG_SHEET_NAME,
     CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME,
     CONFIG.WEEKLY_REPORT_SHEET_NAME,
-    CONFIG.ENERGY_HEATMAP_SHEET_NAME
+    CONFIG.ENERGY_HEATMAP_SHEET_NAME,
+    CONFIG.FINANCE_LOG_SHEET_NAME
   ].forEach(sheetName => {
     const sheet = ss.getSheetByName(sheetName);
     if (sheet) ss.deleteSheet(sheet);
@@ -2906,6 +3279,9 @@ function createAllGeneratedSheets() {
 
   const heatmap = ss.insertSheet(CONFIG.ENERGY_HEATMAP_SHEET_NAME);
   createEnergyHeatmapHeader(heatmap);
+
+  const financeLog = ss.insertSheet(CONFIG.FINANCE_LOG_SHEET_NAME);
+  createFinanceLogHeader_(financeLog);
 }
 
 function createActionLogHeader(sheet) {
@@ -3301,6 +3677,10 @@ function runPulseTaskTests() {
   assert_('queued task is not scheduled', !isScheduledDynamicTaskStatus_('Queued'));
   assert_('started task remains scheduled', isScheduledDynamicTaskStatus_('Started'));
   assert_('completed task is closed', !isActionableDynamicTaskStatus_('Completed'));
+  assert_('finance amount with commas', parseMoneyAmount_('1,250,000') === 1250000);
+  assert_('finance amount with Persian digits', parseMoneyAmount_('۱۲۵۰۰۰') === 125000);
+  assert_('finance expense type normalization', normalizeFinanceType_('خرج') === 'expense');
+  assert_('finance income type normalization', normalizeFinanceType_('درآمد') === 'income');
   assert_(
     'stable Telegram task reference',
     generateTelegramTaskId('2026-07-02', '09:30', 'TG20260702093000ABC123') === '20260702-0930-TGABC123'
@@ -3355,10 +3735,12 @@ function initializePulseTask() {
       '• Dynamic_Schedule',
       '• Weekly_Report',
       '• Energy_Heatmap',
+      '• Finance_Log',
       '',
       'Installed triggers:',
       '• Task reminder check every 5 minutes',
       '• Weekly report every Friday',
+      '• Finance report every Friday',
       '',
       'Smart rescheduling is ready.'
     ].join('\n'));
@@ -3430,7 +3812,8 @@ function ensureGeneratedSheetsExist_() {
     [CONFIG.REMINDER_LOG_SHEET_NAME, createReminderLogHeader],
     [CONFIG.DYNAMIC_SCHEDULE_SHEET_NAME, createDynamicScheduleHeader],
     [CONFIG.WEEKLY_REPORT_SHEET_NAME, createWeeklyReportHeader],
-    [CONFIG.ENERGY_HEATMAP_SHEET_NAME, createEnergyHeatmapHeader]
+    [CONFIG.ENERGY_HEATMAP_SHEET_NAME, createEnergyHeatmapHeader],
+    [CONFIG.FINANCE_LOG_SHEET_NAME, createFinanceLogHeader_]
   ];
 
   sheetDefinitions.forEach(([sheetName, headerFunction]) => {

@@ -18,6 +18,8 @@ PulseTask turns a weekly Google Sheets schedule into an interactive Telegram wor
 - ✅ Removes completed draft cards from the chat after **Add**, **Add & Start**, or **Cancel**
 - 📥 Keeps unstarted Telegram tasks in a **Queue** at `L1` and lets you pick one to start from Telegram
 - ⏳ Writes selected Queue work into **Active Sessions** on `Time/Plan` and checks in every hour
+- 💰 Logs income and expenses from Telegram into a dedicated **Finance_Log** sheet
+- 📊 Sends weekly finance summaries by category and tracks current balance
 - 🎯 Supports Done, Skip, Start, Pause, Later, and smart Reschedule actions
 - 🔄 Finds the nearest conflict-free slot across the next seven days
 - 🔥 Records energy from 1–5 and builds a seven-day hourly heatmap
@@ -41,7 +43,7 @@ flowchart LR
 
 | Component | Responsibility |
 |---|---|
-| Telegram | User interface, commands, inline actions, and persistent Add Task and Queue buttons |
+| Telegram | User interface, commands, inline actions, and persistent Add Task, Queue, Active, and Finance buttons |
 | Cloudflare Worker | Webhook handling, chat authorization, callback parsing, and fast acknowledgements |
 | Google Apps Script | Scheduling logic, task state, reports, triggers, and Telegram delivery |
 | Google Sheets | Weekly plan, dynamic schedule, logs, reports, and energy heatmap |
@@ -50,7 +52,7 @@ The Telegram webhook points to Cloudflare—not directly to Apps Script. Worker-
 
 ## Telegram experience
 
-Send `/start` once to install the persistent **➕ Add Task** and **📥 Queue** buttons below the chat. Add new work normally, or open Queue whenever your schedule is empty and pick a pending task to start.
+Send `/start` once to install the persistent **➕ Add Task**, **📥 Queue**, and **▶️ Active** buttons below the chat. Add new work normally, open Queue whenever your schedule is empty, or open Active to finish a running Queue task early.
 
 - **Add** — save the task
 - **Add & Start** — save it and start timing immediately
@@ -58,7 +60,7 @@ Send `/start` once to install the persistent **➕ Add Task** and **📥 Queue**
 
 After a successful action, the draft card is deleted to keep the chat clean. If saving fails, it stays visible so the action can be retried.
 
-Tasks saved with **Add** are placed in the Queue with status `Queued`, so they do not reserve time or push later slot suggestions forward. Press **📥 Queue** (or send `/queue`) to see every pending Queue task, then select the one you want to do now. PulseTask creates a one-hour block in the **Active Sessions** area of the same `Time/Plan` sheet, starts its timer, and removes it from Queue. After one hour Telegram asks whether the task is **Done** or should **Continue 1h**. Continuing extends the sheet's Finish time and schedules the next hourly check-in. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
+Tasks saved with **Add** are placed in the Queue with status `Queued`, so they do not reserve time or push later slot suggestions forward. Press **📥 Queue** (or send `/queue`) to see every pending Queue task, then select the one you want to do now. PulseTask creates a one-hour block in the **Active Sessions** area of the same `Time/Plan` sheet, starts its timer, removes it from Queue, and immediately sends **Done / Continue 1h** controls. If you finish early, press **✅ Done** or use **▶️ Active** (`/active`) to reopen those controls. After one hour Telegram asks again whether the task is **Done** or should **Continue 1h**. Continuing extends the sheet's Finish time and schedules the next hourly check-in. Tasks saved with **Add & Start** begin immediately and never enter the Queue.
 
 Plain text also creates a task draft. Supported input formats include:
 
@@ -73,12 +75,35 @@ Review the PulseTask changes
 
 When no time is supplied, PulseTask suggests the nearest available 60-minute slot.
 
+### Finance flow
+
+Press **💰 Finance** or send `/finance` to open finance tools. From there:
+
+- **💸 Add Expense** asks for a reply in `AMOUNT | CATEGORY | NOTE` format
+- **💵 Add Income** uses the same format for incoming money
+- **🏦 Balance** shows the current balance plus last-seven-day totals
+- **📊 Week** sends spending totals by category
+
+Examples:
+
+```text
+/expense 250000 | Food | groceries
+/expense 1200000 | Loan | car payment
+/income 5000000 | Salary | July payment
+```
+
+Finance records are written to `Finance_Log`. Set the optional Apps Script property `FINANCE_STARTING_BALANCE` if the balance should start from an existing amount instead of zero.
+
 ### Commands
 
 | Command | Result |
 |---|---|
-| `/start` | Opens PulseTask and installs the persistent Add Task and Queue buttons |
+| `/start` | Opens PulseTask and installs the persistent Add Task, Queue, and Active buttons |
 | `/queue` | Lists pending Queue tasks so you can start one immediately |
+| `/active` | Lists running Queue tasks with Done and Continue controls |
+| `/finance` | Opens the finance menu |
+| `/expense ...` | Creates an expense draft |
+| `/income ...` | Creates an income draft |
 | `/help` | Shows task-input examples |
 | `/add ...` | Creates an unplanned task draft |
 | `/today` | Generates today's report |
@@ -269,6 +294,7 @@ PulseTask creates and maintains these tabs:
 | `Dynamic_Schedule` | Rescheduled and Telegram-created tasks |
 | `Weekly_Report` | Aggregate performance and per-category metrics |
 | `Energy_Heatmap` | Seven-day hourly average energy grid |
+| `Finance_Log` | Income, expenses, categories, notes, and running balance |
 
 Static tasks use references such as `S12`. Dynamic tasks use references such as `D20260702-R12-V1` or Telegram-generated IDs.
 
@@ -325,6 +351,7 @@ RESCHEDULE_SEARCH_DAYS: 7
 `initializePulseTask()` installs:
 
 - `checkUpcomingTaskReminders` every five minutes
+- `sendWeeklyFinanceReport` every Friday around 23:30
 - `sendWeeklyWellbeingReport` every Friday around 23:45
 
 Starting a Queue task also creates a one-time `sendQueueTaskFollowUp` trigger. Choosing **Continue 1h** replaces it with another one-hour trigger; completing the task removes pending follow-ups.
