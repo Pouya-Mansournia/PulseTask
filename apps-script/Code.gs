@@ -9,7 +9,7 @@ const CONFIG = {
   // Main schedule sheet
   SHEET_NAME: getScriptPropertyOrFallback_('MAIN_SHEET_NAME', 'Sheet1'),
 
-  // Generated sheets
+   // Generated sheets
   ACTION_LOG_SHEET_NAME: 'Action_Log',
   MOOD_LOG_SHEET_NAME: 'Mood_Log',
   WEEKLY_REPORT_SHEET_NAME: 'Weekly_Report',
@@ -1121,8 +1121,9 @@ function appendFinanceLogRow_(draft) {
     : -Number(draft.amount);
   const balanceAfter = calculateFinanceBalance_() + signedAmount;
   const transactionId = generateFinanceTransactionId_();
+  const targetRow = getNextFinanceLogRow_(sheet);
 
-  sheet.appendRow([
+  sheet.getRange(targetRow, 1, 1, 11).setValues([[
     Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss'),
     dateKey,
     draft.type,
@@ -1134,9 +1135,18 @@ function appendFinanceLogRow_(draft) {
     draft.telegramChatId || '',
     balanceAfter,
     transactionId
-  ]);
+  ]]);
 
   return { transactionId, balanceAfter };
+}
+
+/**
+ * Finds the next writable Finance_Log row by checking only column A.
+ * Formula columns outside A:K do not affect Telegram transaction inserts.
+ */
+function getNextFinanceLogRow_(sheet) {
+  const lastDataRow = getLastFinanceLogRow_(sheet);
+  return Math.max(2, lastDataRow + 1);
 }
 
 function getFinanceBalanceSummary_() {
@@ -1241,21 +1251,48 @@ function createFinanceLogHeader_(sheet) {
 
 function getFinanceLogRows_() {
   const sheet = getFinanceLogSheet_();
-  if (sheet.getLastRow() < 2) return [];
+  const lastFinanceRow = getLastFinanceLogRow_(sheet);
 
-  return sheet.getDataRange().getDisplayValues().slice(1).map(row => ({
-    loggedAt: cleanCell(row[0]),
-    date: cleanCell(row[1]),
-    type: normalizeFinanceType_(row[2]),
-    amount: Number(String(row[3]).replace(/,/g, '')) || 0,
-    signedAmount: Number(String(row[4]).replace(/,/g, '')) || 0,
-    category: cleanCell(row[5]),
-    note: cleanCell(row[6]),
-    source: cleanCell(row[7]),
-    telegramChatId: cleanCell(row[8]),
-    balanceAfter: Number(String(row[9]).replace(/,/g, '')) || 0,
-    transactionId: cleanCell(row[10])
-  }));
+  if (lastFinanceRow < 2) return [];
+
+  return sheet
+    .getRange(2, 1, lastFinanceRow - 1, 11)
+    .getDisplayValues()
+    .filter(row => cleanCell(row[0]))
+    .map(row => ({
+      loggedAt: cleanCell(row[0]),
+      date: cleanCell(row[1]),
+      type: normalizeFinanceType_(row[2]),
+      amount: Number(String(row[3]).replace(/,/g, '')) || 0,
+      signedAmount: Number(String(row[4]).replace(/,/g, '')) || 0,
+      category: cleanCell(row[5]),
+      note: cleanCell(row[6]),
+      source: cleanCell(row[7]),
+      telegramChatId: cleanCell(row[8]),
+      balanceAfter: Number(String(row[9]).replace(/,/g, '')) || 0,
+      transactionId: cleanCell(row[10])
+    }));
+}
+
+/**
+ * Returns the last real Finance_Log row based only on the Logged At column.
+ * ARRAYFORMULA output in columns L onward is intentionally ignored.
+ */
+function getLastFinanceLogRow_(sheet) {
+  const maxRows = sheet.getMaxRows();
+  if (maxRows < 2) return 1;
+
+  const values = sheet
+    .getRange(2, 1, maxRows - 1, 1)
+    .getDisplayValues();
+
+  for (let index = values.length - 1; index >= 0; index--) {
+    if (cleanCell(values[index][0])) {
+      return index + 2;
+    }
+  }
+
+  return 1;
 }
 
 function calculateFinanceBalance_() {
