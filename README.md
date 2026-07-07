@@ -26,12 +26,76 @@ It is designed as a single-user personal edition: one Telegram chat, one Google 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    U[Telegram user] --> T[Telegram Bot API]
-    T -->|Webhook update| W[Cloudflare Worker]
-    W -->|Authenticated JSON request| A[Google Apps Script Web App]
-    A <--> S[(Google Sheets)]
-    A -->|Reports and reminders| T
+flowchart TB
+    %% PulseTask high-level system map
+    U["Telegram User<br/>Tasks • Energy • Finance"]:::user
+    TG["Telegram Bot API<br/>Webhook + Bot Messages"]:::telegram
+
+    subgraph CF["Cloudflare Edge"]
+        W["Worker<br/>src/index.js"]:::worker
+        AUTH["Chat guard<br/>TELEGRAM_CHAT_ID"]:::worker
+        ROUTER["Callback + command router<br/>Queue • Active • Finance • Reports"]:::worker
+        SESSION["Short-lived finance session<br/>Persistent keyboard flow"]:::worker
+    end
+
+    subgraph GAS["Google Apps Script Web App"]
+        API["doPost API<br/>WORKER_API_SECRET"]:::apps
+        TASKS["Task engine<br/>Done • Skip • Start • Pause • Later"]:::apps
+        QUEUE["Queue + Active Session engine<br/>Start now • Done early • Continue 1h"]:::apps
+        FIN["Finance engine<br/>Income • Expense • Balance • Weekly report"]:::apps
+        REPORTS["Reports + heatmap<br/>Daily • Weekly • Energy"]:::apps
+        TRIGGERS["Time triggers<br/>5m reminders • weekly reports • hourly check-ins"]:::apps
+    end
+
+    subgraph GS["Google Sheets"]
+        MAIN["Main schedule<br/>Start • Finish • State • Weekdays"]:::sheet
+        Q["Queue<br/>L1:Q"]:::sheet
+        ACTIVE["Active Sessions<br/>R1:X"]:::sheet
+        DYN["Dynamic_Schedule"]:::sheet
+        ACTION["Action_Log"]:::sheet
+        MOOD["Mood_Log"]:::sheet
+        FINLOG["Finance_Log"]:::sheet
+        WEEKLY["Weekly_Report"]:::sheet
+        HEAT["Energy_Heatmap"]:::sheet
+        REM["Reminder_Log"]:::sheet
+    end
+
+    U -->|"tap button / send text"| TG
+    TG -->|"webhook update"| W
+    W --> AUTH --> ROUTER
+    ROUTER --> SESSION
+    ROUTER -->|"authenticated JSON"| API
+
+    API --> TASKS
+    API --> QUEUE
+    API --> FIN
+    API --> REPORTS
+    TRIGGERS --> TASKS
+    TRIGGERS --> REPORTS
+    TRIGGERS --> FIN
+
+    TASKS <--> MAIN
+    TASKS <--> DYN
+    TASKS --> ACTION
+    TASKS --> MOOD
+    TASKS --> REM
+    QUEUE <--> Q
+    QUEUE <--> ACTIVE
+    QUEUE <--> DYN
+    FIN <--> FINLOG
+    REPORTS --> WEEKLY
+    REPORTS --> HEAT
+    REPORTS --> ACTION
+    REPORTS --> MOOD
+
+    API -->|"Telegram messages<br/>reminders + reports"| TG
+    TG -->|"inline keyboards<br/>persistent bottom buttons"| U
+
+    classDef user fill:#111827,stroke:#374151,color:#ffffff
+    classDef telegram fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef worker fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    classDef apps fill:#eef2ff,stroke:#6366f1,color:#312e81
+    classDef sheet fill:#ecfdf5,stroke:#10b981,color:#064e3b
 ```
 
 | Layer | Role |
