@@ -31,7 +31,7 @@ export default {
       return Response.json({
         ok: true,
         service: "PulseTask Telegram Worker",
-        version: "2.5-finance-log",
+        version: "2.7-persistent-finance-keyboard",
       });
     }
 
@@ -88,7 +88,49 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
   if (data === "finance:add_expense" || data === "finance:add_income") {
     const transactionType = data.endsWith("income") ? "income" : "expense";
     await answerCallbackQuery(env, callbackId, transactionType === "income" ? "Income entry opened." : "Expense entry opened.");
-    await sendFinanceEntryPrompt(env, chatId, transactionType);
+    await setFinanceSession(chatId, { kind: "amount", transactionType });
+    await sendFinanceAmountPrompt(env, chatId, transactionType);
+    return;
+  }
+
+  if (data.startsWith("fincat:")) {
+    const categorySelection = parseFinanceCategoryCallback(data);
+
+    if (!categorySelection.ok) {
+      await answerCallbackQuery(env, callbackId, categorySelection.message);
+      return;
+    }
+
+    await answerCallbackQuery(env, callbackId, "Category selected.");
+
+    if (categorySelection.categoryKey === "other") {
+      await setFinanceSession(chatId, {
+        kind: "category",
+        transactionType: categorySelection.transactionType,
+        amount: categorySelection.amount,
+      });
+      await sendFinanceCustomCategoryPrompt(
+        env,
+        chatId,
+        categorySelection.transactionType,
+        categorySelection.amount
+      );
+      return;
+    }
+
+    await setFinanceSession(chatId, {
+      kind: "note",
+      transactionType: categorySelection.transactionType,
+      amount: categorySelection.amount,
+      category: categorySelection.categoryLabel,
+    });
+    await sendFinanceNotePrompt(
+      env,
+      chatId,
+      categorySelection.transactionType,
+      categorySelection.amount,
+      categorySelection.categoryLabel
+    );
     return;
   }
 
@@ -154,6 +196,8 @@ async function processCallbackAction(env, parsed, chatId, messageId, actionData)
   if (parsed.financeDraft && result?.message) {
     if (parsed.action === "confirm_finance_draft") {
       await sendTelegramMessage(env, chatId, [
+        "✅ Done — ثبت شد",
+        "",
         result.type === "income" ? "💵 Income saved" : "💸 Expense saved",
         "",
         `Amount: ${formatMoneyText(result.amount)}`,
@@ -409,17 +453,28 @@ async function handleIncomingMessage(message, env, ctx) {
       "/add 90m | Research | Read robotics paper",
       "/queue to pick a pending task and start it now",
       "/active to mark a running Queue task as Done early",
-      "/expense 250000 | Food | groceries",
-      "/income 5000000 | Salary | July payment",
+      "/expense to log an expense step by step",
+      "/income to log income step by step",
       "",
       "You can also send plain text directly and I will suggest the next available free slot automatically.",
     ].join("\n"));
     return;
   }
 
-  const financeReplyType = getFinanceReplyType(message.reply_to_message?.text);
-  if (financeReplyType && rawText) {
-    await prepareFinanceDraft(env, chatId, rawText, financeReplyType);
+  const financeStep = getFinanceReplyStep(message.reply_to_message?.text);
+  if (financeStep && rawText) {
+    await handleFinanceStepReply(env, chatId, rawText, financeStep);
+    return;
+  }
+
+  const financeSession = await getFinanceSession(chatId);
+  if (
+    financeSession &&
+    rawText &&
+    !text.startsWith("/") &&
+    !isMainMenuText(rawText)
+  ) {
+    await handleFinanceStepReply(env, chatId, rawText, financeSession);
     return;
   }
 
@@ -428,15 +483,22 @@ async function handleIncomingMessage(message, env, ctx) {
     const input = rawText.replace(/^\/(?:expense|income)\s*/i, "").trim();
 
     if (!input) {
-      await sendFinanceEntryPrompt(env, chatId, transactionType);
+      await setFinanceSession(chatId, { kind: "amount", transactionType });
+      await sendFinanceAmountPrompt(env, chatId, transactionType);
       return;
     }
 
-    await prepareFinanceDraft(env, chatId, input, transactionType);
+    if (input.includes("|")) {
+      await prepareFinanceDraft(env, chatId, input, transactionType);
+      return;
+    }
+
+    await sendFinanceCategoryPicker(env, chatId, transactionType, input);
     return;
   }
 
   if (text.startsWith("/add")) {
+    await clearFinanceSession(chatId);
     const result = await sendToAppsScript(env, {
       action: "prepare_task_draft",
       taskInput: rawText,
@@ -471,27 +533,32 @@ async function handleIncomingMessage(message, env, ctx) {
   }
 
   if (rawText === "📥 Queue" || text.startsWith("/queue")) {
+    await clearFinanceSession(chatId);
     await sendQueueList(env, chatId);
     return;
   }
 
   if (rawText === "▶️ Active" || text.startsWith("/active")) {
+    await clearFinanceSession(chatId);
     await sendActiveQueueList(env, chatId);
     return;
   }
 
   if (rawText === "💰 Finance" || text.startsWith("/finance")) {
+    await clearFinanceSession(chatId);
     await sendFinanceMenu(env, chatId);
     return;
   }
 
   if (rawText === "💸 Add Expense") {
-    await sendFinanceEntryPrompt(env, chatId, "expense");
+    await setFinanceSession(chatId, { kind: "amount", transactionType: "expense" });
+    await sendFinanceAmountPrompt(env, chatId, "expense");
     return;
   }
 
   if (rawText === "💵 Add Income") {
-    await sendFinanceEntryPrompt(env, chatId, "income");
+    await setFinanceSession(chatId, { kind: "amount", transactionType: "income" });
+    await sendFinanceAmountPrompt(env, chatId, "income");
     return;
   }
 
@@ -562,6 +629,17 @@ function getMainMenuKeyboard(inputPlaceholder) {
     is_persistent: true,
     input_field_placeholder: inputPlaceholder || "Choose an action...",
   };
+}
+
+function isMainMenuText(text) {
+  return [
+    "➕ Add Task",
+    "📥 Queue",
+    "▶️ Active",
+    "💰 Finance",
+    "💸 Add Expense",
+    "💵 Add Income",
+  ].includes(String(text || "").trim());
 }
 
 async function sendQueueList(env, chatId) {
@@ -659,14 +737,13 @@ async function sendFinanceMenu(env, chatId) {
     [
       "💰 Finance",
       "",
-      "Log income and expenses without leaving Telegram.",
+      "Log income and expenses step by step.",
       "",
-      "Format:",
-      "AMOUNT | CATEGORY | NOTE",
-      "",
-      "Examples:",
-      "250000 | Food | groceries",
-      "5000000 | Salary | July payment",
+      "Flow:",
+      "1) Enter amount",
+      "2) Pick category",
+      "3) Add an optional note",
+      "4) Save",
     ].join("\n"),
     {
       inline_keyboard: [
@@ -683,6 +760,245 @@ async function sendFinanceMenu(env, chatId) {
   );
 }
 
+const FINANCE_EXPENSE_CATEGORIES = [
+  ["Food", "Food"],
+  ["Transport", "Transport"],
+  ["Bills", "Bills"],
+  ["Loan", "Loan"],
+  ["Rent", "Rent"],
+  ["Health", "Health"],
+  ["Education", "Education"],
+  ["Shopping", "Shopping"],
+  ["Other", "other"],
+];
+
+const FINANCE_INCOME_CATEGORIES = [
+  ["Salary", "Salary"],
+  ["Freelance", "Freelance"],
+  ["Gift", "Gift"],
+  ["Investment", "Investment"],
+  ["Refund", "Refund"],
+  ["Other", "other"],
+];
+
+async function sendFinanceAmountPrompt(env, chatId, transactionType) {
+  const isIncome = transactionType === "income";
+  await callTelegramApi(env, "sendMessage", {
+    chat_id: chatId,
+    text: [
+      isIncome ? "💵 Income Amount" : "💸 Expense Amount",
+      "",
+      "Reply with the amount only.",
+      "",
+      isIncome ? "Example: 5000000" : "Example: 250000",
+    ].join("\n"),
+    reply_markup: getMainMenuKeyboard(isIncome ? "5000000" : "250000"),
+  });
+}
+
+async function handleFinanceStepReply(env, chatId, rawText, step) {
+  if (step.kind === "amount") {
+    await sendFinanceCategoryPicker(env, chatId, step.transactionType, rawText);
+    return;
+  }
+
+  if (step.kind === "category") {
+    const category = rawText.trim();
+    if (!category || category.length > 80) {
+      await sendTelegramMessage(env, chatId, "Please send a shorter category name.");
+      return;
+    }
+
+    await setFinanceSession(chatId, {
+      kind: "note",
+      transactionType: step.transactionType,
+      amount: step.amount,
+      category,
+    });
+    await sendFinanceNotePrompt(env, chatId, step.transactionType, step.amount, category);
+    return;
+  }
+
+  if (step.kind === "note") {
+    const note = isEmptyFinanceNote(rawText) ? "" : rawText.trim();
+    await prepareFinanceDraft(env, chatId, `${step.amount} | ${step.category} | ${note}`, step.transactionType);
+    await clearFinanceSession(chatId);
+  }
+}
+
+async function sendFinanceCategoryPicker(env, chatId, transactionType, amountInput) {
+  const amount = normalizeFinanceAmountInput(amountInput);
+
+  if (!amount) {
+    await sendTelegramMessage(env, chatId, "Amount should be a number greater than zero. Please try again.");
+    await sendFinanceAmountPrompt(env, chatId, transactionType);
+    return;
+  }
+
+  const isIncome = transactionType === "income";
+  const categories = isIncome ? FINANCE_INCOME_CATEGORIES : FINANCE_EXPENSE_CATEGORIES;
+  const buttons = [];
+
+  for (let index = 0; index < categories.length; index += 2) {
+    buttons.push(categories.slice(index, index + 2).map(([label, value]) => ({
+      text: label,
+      callback_data: `fincat:${transactionType}:${encodeURIComponent(amount)}:${encodeURIComponent(value)}`,
+    })));
+  }
+
+  await sendTelegramMessageWithKeyboard(env, chatId, [
+    isIncome ? "💵 Income Category" : "💸 Expense Category",
+    "",
+    `Amount: ${amount}`,
+    "",
+    "Pick a category:",
+  ].join("\n"), { inline_keyboard: buttons });
+}
+
+async function sendFinanceCustomCategoryPrompt(env, chatId, transactionType, amount) {
+  await callTelegramApi(env, "sendMessage", {
+    chat_id: chatId,
+    text: [
+      "Custom category",
+      "",
+      `Amount: ${amount}`,
+      "",
+      "Reply with the category name.",
+    ].join("\n"),
+    reply_markup: getMainMenuKeyboard("Food, Loan, Subscription..."),
+  });
+}
+
+async function sendFinanceNotePrompt(env, chatId, transactionType, amount, category) {
+  await callTelegramApi(env, "sendMessage", {
+    chat_id: chatId,
+    text: [
+      "Any note?",
+      "",
+      `Amount: ${amount}`,
+      `Category: ${category}`,
+      "",
+      "Reply with a short note, or send - if you do not need one.",
+    ].join("\n"),
+    reply_markup: getMainMenuKeyboard("groceries, July salary, or -"),
+  });
+}
+
+function parseFinanceCategoryCallback(data) {
+  const parts = data.split(":");
+  const transactionType = parts[1];
+  const amount = decodeURIComponent(parts[2] || "");
+  const categoryKey = decodeURIComponent(parts[3] || "");
+
+  if (!["income", "expense"].includes(transactionType) || !amount || !categoryKey) {
+    return { ok: false, message: "Invalid finance category." };
+  }
+
+  const categories = transactionType === "income"
+    ? FINANCE_INCOME_CATEGORIES
+    : FINANCE_EXPENSE_CATEGORIES;
+  const match = categories.find(([, value]) => value === categoryKey);
+
+  if (!match) {
+    return { ok: false, message: "Unknown finance category." };
+  }
+
+  return {
+    ok: true,
+    transactionType,
+    amount,
+    categoryKey,
+    categoryLabel: match[0],
+  };
+}
+
+function getFinanceReplyStep(text) {
+  const value = String(text || "");
+  const amountMatch = value.match(/#finance_amount_(income|expense)/);
+  if (amountMatch) {
+    return { kind: "amount", transactionType: amountMatch[1] };
+  }
+
+  const categoryMatch = value.match(/#finance_category_(income|expense)_([^\s]+)/);
+  if (categoryMatch) {
+    return {
+      kind: "category",
+      transactionType: categoryMatch[1],
+      amount: decodeURIComponent(categoryMatch[2]),
+    };
+  }
+
+  const noteMatch = value.match(/#finance_note_(income|expense)_([^\s]+)_([^\s]+)/);
+  if (noteMatch) {
+    return {
+      kind: "note",
+      transactionType: noteMatch[1],
+      amount: decodeURIComponent(noteMatch[2]),
+      category: decodeURIComponent(noteMatch[3]),
+    };
+  }
+
+  return null;
+}
+
+function normalizeFinanceAmountInput(value) {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/[,\s]/g, "")
+    .replace(/[^\d.۰-۹٠-٩]/g, "")
+    .replace(/[۰-۹]/g, (digit) => "۰۱۲۳۴۵۶۷۸۹".indexOf(digit))
+    .replace(/[٠-٩]/g, (digit) => "٠١٢٣٤٥٦٧٨٩".indexOf(digit));
+  const amount = Number(normalized);
+
+  if (!Number.isFinite(amount) || amount <= 0) return "";
+  return String(Math.round(amount * 100) / 100);
+}
+
+function isEmptyFinanceNote(value) {
+  return ["", "-", "—", "no", "none", "na", "n/a", "نه", "ندارم"].includes(
+    String(value || "").trim().toLowerCase()
+  );
+}
+
+function getFinanceSessionRequest(chatId) {
+  return new Request(`https://pulsetask.local/finance-session/${encodeURIComponent(chatId)}`);
+}
+
+async function setFinanceSession(chatId, session) {
+  try {
+    await caches.default.put(
+      getFinanceSessionRequest(chatId),
+      new Response(JSON.stringify(session), {
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "max-age=900",
+        },
+      })
+    );
+  } catch (error) {
+    console.error("Could not save finance session:", error);
+  }
+}
+
+async function getFinanceSession(chatId) {
+  try {
+    const response = await caches.default.match(getFinanceSessionRequest(chatId));
+    if (!response) return null;
+    return await response.json();
+  } catch (error) {
+    console.error("Could not read finance session:", error);
+    return null;
+  }
+}
+
+async function clearFinanceSession(chatId) {
+  try {
+    await caches.default.delete(getFinanceSessionRequest(chatId));
+  } catch (error) {
+    console.error("Could not clear finance session:", error);
+  }
+}
+
 async function sendFinanceEntryPrompt(env, chatId, transactionType) {
   const isIncome = transactionType === "income";
   await callTelegramApi(env, "sendMessage", {
@@ -697,13 +1013,9 @@ async function sendFinanceEntryPrompt(env, chatId, transactionType) {
         ? "Example: 5000000 | Salary | July payment"
         : "Example: 250000 | Food | groceries",
     ].join("\n"),
-    reply_markup: {
-      force_reply: true,
-      selective: true,
-      input_field_placeholder: isIncome
-        ? "5000000 | Salary | July payment"
-        : "250000 | Food | groceries",
-    },
+    reply_markup: getMainMenuKeyboard(
+      isIncome ? "5000000 | Salary | July payment" : "250000 | Food | groceries"
+    ),
   });
 }
 
