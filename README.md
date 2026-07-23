@@ -1,13 +1,101 @@
 # PulseTask
 
+**Run your day from Telegram. Your Google Sheet does the remembering.**
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![Google Apps Script](https://img.shields.io/badge/Google%20Apps%20Script-4285F4?logo=google&logoColor=white)](https://developers.google.com/apps-script)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
 
-PulseTask is a serverless personal operating system for time, tasks, energy, and spending. It connects Telegram, Cloudflare Workers, Google Apps Script, and Google Sheets so a weekly schedule becomes an interactive assistant: reminders, task actions, queue-based work sessions, smart rescheduling, finance logging, and weekly reports.
+PulseTask turns a Google Sheet schedule into a Telegram assistant that reminds you before tasks start, logs what actually happened, tracks your energy, and records what you spent — all with tap-button replies, no app to install and no server to babysit.
 
-It is designed as a single-user personal edition: one Telegram chat, one Google Sheet, no VPS, no database server, and no always-on local machine.
+No VPS. No database. No always-on local machine. Just Telegram + a Google Sheet you already own, wired together by a Cloudflare Worker and a Google Apps Script deployment. Built as a single-user personal edition: one chat, one sheet.
+
+## See it in action
+
+A typical evening, entirely from the Telegram chat:
+
+```text
+PulseTask  17:32
+⏰ Reminder: "Deep Work — Weekly review" starts in 1 hour (18:30-20:00)
+
+You  18:31
+/add 90m | Development | Fix finance reply bug
+
+PulseTask  18:31
+📝 Add to schedule now?
+   Development | Fix finance reply bug | 90m
+   [ ➕ Add & Start ]  [ 📥 Add to Queue ]  [ ✖ Cancel ]
+
+You         (taps) ➕ Add & Start
+
+PulseTask  18:31
+▶️ Started. Ends ~20:01.
+   [ ✅ Done ]  [ ⏸ Pause ]  [ ⏭ Continue 1h ]
+
+You         (taps) ✅ Done
+
+PulseTask  18:31
+🔋 How's your energy right now? (1-5)
+
+You         (taps) 4
+
+PulseTask  20:05
+💰 Finance
+   [ 💸 Add Expense ]  [ 💵 Add Income ]
+
+You         (taps) 💸 Add Expense → 250000 → Food → "groceries" → Save
+
+PulseTask  20:05
+✅ Logged -250,000 (Food). Balance: 4,750,000
+```
+
+Every message above updates the same Google Sheet: `Action_Log`, `Mood_Log`, and `Finance_Log` fill in automatically, and the weekly report and energy heatmap are built from that data.
+
+## Quick Start
+
+Full walkthrough is in [Setup](#setup) below and [docs/SETUP.md](docs/SETUP.md); this is the short version once you have a Telegram bot token, a Google Sheet, and a Cloudflare account:
+
+```powershell
+# 1. Google Sheet: Extensions → Apps Script → paste apps-script/Code.gs,
+#    add the Script Properties (bot token, chat ID, shared secret), then run once:
+initializePulseTask()
+
+# 2. Deploy the Apps Script project as a Web App and copy the /exec URL
+
+# 3. Cloudflare Worker: point it at that URL
+cd cloudflare-worker
+npm install
+npx wrangler login
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_CHAT_ID
+npx wrangler secret put APPS_SCRIPT_URL
+npx wrangler secret put WORKER_API_SECRET
+npm run deploy
+
+# 4. Point the Telegram webhook at your deployed Worker, then in Telegram:
+#    /start
+```
+
+That's it — the persistent keyboard (`➕ Add Task`, `📥 Queue`, `▶️ Active`, `💰 Finance`) appears and PulseTask starts sending reminders on your schedule.
+
+## Why PulseTask
+
+- **One source of truth you already own** — everything lives in your Google Sheet, readable and editable without PulseTask.
+- **Zero always-on infrastructure** — Cloudflare Worker + Apps Script are both request-driven; nothing runs (or costs money) while you're not using it.
+- **Tap, don't type** — inline buttons and a persistent keyboard drive tasks, queue, active sessions, and finance; typed commands are there when you want them.
+- **Reminders that don't need you online** — Apps Script time triggers send reminders and weekly reports even if the Worker never receives a webhook call that day.
+- **Credentials never touch source control** — secrets live in Cloudflare Secrets and Apps Script Properties, not in the repo. See [Security](#security).
+
+## Roadmap
+
+PulseTask v1 (current) is a working single-user system. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full list; near-term direction:
+
+| Version | Focus |
+|---|---|
+| v1 (current) | Single-user Telegram bot, Cloudflare webhook, Apps Script backend, daily/weekly reports, energy heatmap |
+| v1.1 | Idempotency for duplicate background requests, better Start/Pause duration tracking, configurable report schedule, localized messages |
+| v2 | Cloudflare D1 event store, multi-user onboarding, per-user Sheet connections, web dashboard |
 
 ## What it does
 
